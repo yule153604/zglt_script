@@ -30,6 +30,91 @@ ANOTHER_ENCRYPTION_KEY = "f4cd4ffeb5554586acf65ba7110534f5"
 SERVICE_LIFE = "wocareMBHServiceLife1"
 MIN_RETRIES = "1"
 
+# ====================  Global Market Raffle State  ====================
+# 全局奖池状态，多账号共享，只查询一次
+class MarketRaffleState:
+    def __init__(self):
+        self.checked = False       # 是否已检查
+        self.has_prizes = False    # 是否有奖品可抽
+        self.prizes = []           # 奖品列表
+        self.lock = asyncio.Lock() # 异步锁
+
+    async def check_prizes(self, http_client, market_token):
+        """检查奖池状态，只执行一次"""
+        async with self.lock:
+            if self.checked:
+                return self.has_prizes
+
+            print("\n" + "="*60)
+            print("权益超市奖品池查询")
+            print("="*60)
+
+            try:
+                res = await http_client.request(
+                    'POST',
+                    'https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/prizeList?id=12',
+                    headers={'Authorization': f'Bearer {market_token}'},
+                    data=''
+                )
+
+                result = res['result']
+                if result and result.get('code') == 200 and isinstance(result.get('data'), list):
+                    self.prizes = result['data']
+
+                    # 筛选今日奖池（概率>0的奖品）
+                    today_prizes = [p for p in self.prizes if float(p.get('probability', 0)) > 0]
+                    total = len(today_prizes)
+                    print(f"今日奖池共 {total} 个奖品:\n")
+
+                    # 有效奖品关键词
+                    include_keywords = ['月卡', '周卡', '月度', '季卡']
+                    exclude_keywords = ['5G宽视界', '沃视频']
+
+                    valid_count = 0
+                    for i, prize in enumerate(today_prizes, 1):
+                        name = prize.get('name', '未知')
+                        try:
+                            daily_limit = int(prize.get('dailyPrizeLimit', 0))
+                            quantity = int(prize.get('quantity', 0))
+                            prob = float(prize.get('probability', 0))
+                        except:
+                            daily_limit = 0
+                            quantity = 0
+                            prob = 0.0
+
+                        # 判断奖品是否有效：包含指定关键词、不含排除关键词、概率>0
+                        has_include = any(kw in name for kw in include_keywords)
+                        has_exclude = any(kw in name for kw in exclude_keywords)
+                        is_valid = has_include and not has_exclude and prob > 0
+
+                        status = "✅" if is_valid else "❌"
+                        if is_valid:
+                            valid_count += 1
+
+                        print(f"  {status} [{i:02d}] {name}")
+                        print(f"       今日投放: {daily_limit} | 总库存: {quantity} | 概率: {prob*100:.2f}%")
+
+                    print(f"\n{'='*60}")
+                    if valid_count > 0:
+                        self.has_prizes = True
+                        print(f"结论: 当前已放水！有效奖品 {valid_count}/{total} 个，可以抽奖")
+                    else:
+                        self.has_prizes = False
+                        print(f"结论: 当前未放水！无有效奖品，跳过抽奖")
+                    print("="*60 + "\n")
+                else:
+                    print(f"奖品池查询失败: {result}")
+                    self.has_prizes = False
+            except Exception as e:
+                print(f"奖品池查询异常: {str(e)}")
+                self.has_prizes = False
+
+            self.checked = True
+            return self.has_prizes
+
+# 全局奖池状态实例
+market_raffle_state = MarketRaffleState()
+
 # ====================  Utils  ====================
 class Logger:
     def __init__(self, prefix=""):
@@ -707,13 +792,15 @@ class CustomUserService:
             result = res['result']
             if result and result.get('code') == 200:
                 data = result.get('data', {})
-                triggered = data.get('triggeredTime', 0)
-                self.logger.log(f"浇花状态: {triggered}/{data.get('triggerTime')}")
-                
-                if triggered == 0:
+                triggered = int(data.get('triggeredTime', 0))
+                trigger_time = int(data.get('triggerTime', 1))
+                self.logger.log(f"浇花状态: {triggered}/{trigger_time}")
+
+                # 只要未完成全部次数就继续浇花
+                if triggered < trigger_time:
                     await self.market_watering()
                 else:
-                    self.logger.log("今日已完成浇花")
+                    self.logger.log("浇花任务已全部完成")
             else:
                 self.logger.log(f"获取浇花状态失败: {result}")
         except Exception as e:
@@ -736,7 +823,29 @@ class CustomUserService:
         except Exception as e:
             self.logger.log(f"权益超市浇花异常: {str(e)}")
 
+    async def market_validate_captcha(self):
+        """人机验证"""
+        try:
+            res = await self.http.request(
+                'POST',
+                'https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/validateCaptcha?id=12',
+                headers={'Authorization': f'Bearer {self.market_token}'},
+                data=''
+            )
+
+            result = res['result']
+            if result and result.get('code') == 200:
+                self.logger.log("权益超市: 人机验证通过，继续抽奖")
+                return await self.market_raffle()
+            else:
+                self.logger.log(f"权益超市: 人机验证失败 {result}")
+                return False
+        except Exception as e:
+            self.logger.log(f"权益超市人机验证异常: {str(e)}")
+            return False
+
     async def market_raffle_task(self):
+        """权益超市抽奖任务"""
         try:
             y_gdtco4r = "0QDEN3AEqWlrU036_dbyBvP8.68dggpJ9Em3UEzaRWLwzFshel7nj1kEQxCiI.B_fIDMRTiEwAgmaG93mDGPLvSObw_.EMz5QG4wZp7CfpHt4y4WwUioW5NoIaRtTpiyNJN6ncFGlF607_haxxASNFfzwkxRl9XZq9UfHhGY.UCzebcoAawBTyh62PdjF.ka.HIygQuhbb16HitF0IfX_cdZc2wVsIUfLSnSYulZaLnoSo.7..nRFnMyydrDjQE4tfOT08heVczyyR6Bpn.ZazNvmNZD1EgfxCRTcQDUdHFb_XDfPbqvX2N0dtYdKgSV_1s5u8RlyUwXr1HlqKEpKb83uWfIPLaOpm3xFnKupjRqj1UoDz.vB0iRRkkYtAd8nPoY654drckOD7GEQQs79zJyMTZV_ExNU72MAqvZRdRUZZz8oho.t6WzyX5R2pOSrPRgO84hba3Ez52DbM_08n8qRm3bW1TaviGW1VEwQVH74R_Eo0pxoZDfHTbAGC3vAAzz7R8sqLVphu972XyCB72Ba1XGElelViYqGnG3p_SZ_LzzpQMJdGSa"
             res = await self.http.request(
@@ -748,16 +857,19 @@ class CustomUserService:
                 },
                 data=''
             )
-            
+
             result = res['result']
             count = 0
             if result and result.get('code') == 200:
                 count = result.get('data', 0)
                 self.logger.log(f"权益超市可抽奖次数: {count}")
-            
+
             for i in range(count):
                 await asyncio.sleep(3)
                 await self.market_raffle()
+
+            # 抽奖完成后查询奖池信息（仅展示，全局只查一次）
+            await market_raffle_state.check_prizes(self.http, self.market_token)
         except Exception as e:
             self.logger.log(f"权益超市抽奖任务异常: {str(e)}")
 
@@ -776,12 +888,24 @@ class CustomUserService:
             
             result = res['result']
             if result and result.get('code') == 200:
-                prize = result.get('data', {}).get('prizesName') or '未抽中'
-                self.logger.log(f"权益超市抽奖: {prize}", notify=True)
+                data = result.get('data', {})
+                prize = data.get('prizesName') or '未抽中'
+                message = data.get('message', '')
+                if prize and prize != '未抽中':
+                    self.logger.log(f"权益超市抽奖: 恭喜抽中 {prize}", notify=True)
+                else:
+                    self.logger.log(f"权益超市抽奖: {message or prize}")
+                return True
+            elif result and result.get('code') == 500:
+                # 触发人机验证
+                self.logger.log("权益超市: 触发人机验证，自动验证中...")
+                return await self.market_validate_captcha()
             else:
-                self.logger.log(f"权益超市抽奖失败: {result}")
+                self.logger.log(f"权益超市抽奖失败: {result.get('message', result)}")
+                return False
         except Exception as e:
             self.logger.log(f"权益超市抽奖异常: {str(e)}")
+            return False
 
     # ====================  Xinjiang (xj)  ====================
     async def xj_task(self):
