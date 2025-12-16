@@ -19,8 +19,17 @@ from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
 import httpx
 
+# 可选依赖：账密登录需要 pycryptodome
+try:
+    from Crypto.PublicKey import RSA
+    from Crypto.Cipher import PKCS1_v1_5
+    HAS_CRYPTO = True
+except ImportError:
+    HAS_CRYPTO = False
+
 # ====================  Constants  ====================
 APP_VERSION = "iphone_c@11.0503"
+SHOW_PRIZE_POOL = False  # 是否显示权益超市奖品池信息，默认关闭
 USER_AGENT = f"Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{{version:{APP_VERSION}}}"
 APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922869a8d2313b6f2f9f3b57f2901f0021c4575e4b6949ae18b7f6761d465c12321788dcd980aa1a641789d1188bb"
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
@@ -29,6 +38,80 @@ ANOTHER_API_KEY = "beea1c7edf7c4989b2d3621c4255132f"
 ANOTHER_ENCRYPTION_KEY = "f4cd4ffeb5554586acf65ba7110534f5"
 SERVICE_LIFE = "wocareMBHServiceLife1"
 MIN_RETRIES = "1"
+
+# ====================  青龙API操作  ====================
+def ql_get_env(name):
+    """获取青龙环境变量"""
+    try:
+        res = QLAPI.getEnvs({"searchValue": name})
+        for env in res.get("data", []):
+            if env.get("name") == name:
+                return env
+        return None
+    except:
+        return None
+
+def ql_update_env(env_data):
+    """更新青龙环境变量"""
+    try:
+        QLAPI.updateEnv({"env": env_data})
+        return True
+    except:
+        return False
+
+def ql_update_cookie_to_token(phone, token_online, appid):
+    """
+    将 chinaUnicomCookie 中对应手机号的账密格式更新为 token_online#appid 格式
+    账密格式: 手机号#密码
+    Token格式: token_online#appid
+    """
+    try:
+        env = ql_get_env("chinaUnicomCookie")
+        if not env:
+            print(f"[QL] 未找到 chinaUnicomCookie 环境变量")
+            return False
+
+        old_value = env.get("value", "")
+        if not old_value:
+            return False
+
+        # 分割多账号（@分隔）
+        accounts = old_value.split("@")
+        updated = False
+        new_accounts = []
+
+        for account in accounts:
+            account = account.strip()
+            if not account:
+                continue
+
+            # 检查是否是当前手机号的账密格式
+            if account.startswith(phone + "#"):
+                parts = account.split("#")
+                # 账密格式：手机号#密码（密码长度通常<50）
+                if len(parts) >= 2 and len(parts[1]) < 50:
+                    # 替换为 token_online#appid 格式
+                    new_accounts.append(f"{token_online}#{appid}")
+                    updated = True
+                    print(f"[QL] 账号 {phone} 已从账密格式更新为Token格式")
+                else:
+                    new_accounts.append(account)
+            else:
+                new_accounts.append(account)
+
+        if updated:
+            env["value"] = "@".join(new_accounts)
+            if ql_update_env(env):
+                print(f"[QL] chinaUnicomCookie 环境变量更新成功")
+                return True
+            else:
+                print(f"[QL] chinaUnicomCookie 环境变量更新失败")
+                return False
+
+        return False
+    except Exception as e:
+        print(f"[QL] 更新环境变量异常: {str(e)}")
+        return False
 
 # ====================  Global Market Raffle State  ====================
 # 全局奖池状态，多账号共享，只查询一次
@@ -170,22 +253,76 @@ class HttpClient:
                     return {'statusCode': -1, 'headers': {}, 'result': None}
                 await asyncio.sleep(1 + attempt * 2)
 
+# ====================  RSA Encrypt (账密登录)  ====================
+class RSAEncrypt:
+    """RSA加密类，用于账号密码登录"""
+    def __init__(self):
+        self.public_key = """-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDc+CZK9bBA9IU+gZUOc6FUGu7y
+O9WpTNB0PzmgFBh96Mg1WrovD1oqZ+eIF4LjvxKXGOdI79JRdve9NPhQo07+uqGQ
+gE4imwNnRx7PFtCRryiIEcUoavuNtuRVoBAm6qdB0SrctgaqGfLgKvZHOnwTjyNq
+jBUxzMeQlEC2czEMSwIDAQAB
+-----END PUBLIC KEY-----"""
+        self.max_block_size = 117
+
+    def encrypt(self, plaintext, is_password=False):
+        """RSA加密"""
+        if not HAS_CRYPTO:
+            return ""
+        try:
+            if is_password:
+                plaintext = plaintext + "000000"
+
+            raw = plaintext.encode('utf-8')
+            pubkey = RSA.import_key(self.public_key)
+            cipher = PKCS1_v1_5.new(pubkey)
+
+            result = []
+            for i in range(0, len(raw), self.max_block_size):
+                block = raw[i:i + self.max_block_size]
+                encrypted_block = cipher.encrypt(block)
+                result.append(encrypted_block)
+
+            encrypted = b"".join(result)
+            return base64.b64encode(encrypted).decode('utf-8')
+        except Exception as e:
+            return ""
+
 class CustomUserService:
     def __init__(self, cookie, index=1):
         self.cookie = cookie
         self.index = index
         self.logger = Logger(prefix=f"账号{index}")
         self.http = HttpClient(self.logger)
-        self.token_online = cookie.split('#')[0]
         self.valid = False
         self.mobile = ""
-        self.app_id = APP_ID
         self.app_version = APP_VERSION
-        
+
+        # 解析登录方式：账密登录格式为"手机号#密码"（密码较短），token登录格式为长token字符串
+        self.login_mode = self._detect_login_mode(cookie)
+        if self.login_mode == "password":
+            parts = cookie.split('#')
+            self.phone = parts[0]
+            self.password = parts[1] if len(parts) > 1 else ""
+            self.token_online = ""
+            # 生成 appid（用于账密登录）
+            self.app_id = self._generate_appid()
+        else:
+            # Token登录格式：token_online 或 token_online#appid
+            parts = cookie.split('#')
+            self.token_online = parts[0]
+            self.phone = ""
+            self.password = ""
+            # 如果有第二部分且长度足够长（appid特征），则使用它
+            if len(parts) >= 2 and len(parts[1]) > 50:
+                self.app_id = parts[1]
+            else:
+                self.app_id = APP_ID
+
         self.unicom_token_id = self.random_string(32)
         self.token_id_cookie = "chinaunicom-" + self.random_string(32, string.ascii_uppercase + string.digits)
         self.sdkuuid = self.unicom_token_id
-        
+
         self.http.cookies.set("TOKENID_COOKIE", self.token_id_cookie, domain=".10010.com")
         self.http.cookies.set("UNICOM_TOKENID", self.unicom_token_id, domain=".10010.com")
         self.http.cookies.set("sdkuuid", self.sdkuuid, domain=".10010.com")
@@ -196,6 +333,30 @@ class CustomUserService:
         self.wocare_token = ""
         self.wocare_sid = ""
         self.ecs_token = ""
+
+    def _detect_login_mode(self, cookie):
+        """检测登录模式：账密登录或token登录"""
+        if '#' in cookie:
+            parts = cookie.split('#')
+            # 账密登录格式：手机号#密码（手机号11位数字，密码通常较短）
+            if len(parts) >= 2:
+                phone = parts[0]
+                password = parts[1]
+                # 手机号应为11位数字，密码长度通常小于50
+                if phone.isdigit() and len(phone) == 11 and len(password) < 50:
+                    return "password"
+        # 默认为token登录
+        return "token"
+
+    def _generate_appid(self):
+        """生成账密登录用的appid"""
+        return (
+            f"{random.randint(0,9)}f{random.randint(0,9)}af"
+            f"{random.randint(0,9)}{random.randint(0,9)}ad"
+            f"{random.randint(0,9)}912d306b5053abf90c7ebbb695887bc"
+            "870ae0706d573c348539c26c5c0a878641fcc0d3e90acb9be1e6ef858a"
+            "59af546f3c826988332376b7d18c8ea2398ee3a9c3db947e2471d32a49612"
+        )
 
     def random_string(self, length, chars=string.ascii_letters + string.digits):
         return ''.join(random.choice(chars) for _ in range(length))
@@ -226,6 +387,114 @@ class CustomUserService:
 
     # ====================  Login  ====================
     async def online(self):
+        """登录方法：根据登录模式自动选择token登录或账密登录"""
+        if self.login_mode == "password":
+            return await self._login_with_password()
+        else:
+            return await self._login_with_token()
+
+    async def _login_with_password(self):
+        """账号密码登录"""
+        if not HAS_CRYPTO:
+            self.logger.log("账密登录需要 pycryptodome 库，请安装: pip install pycryptodome")
+            return False
+
+        try:
+            self.logger.log(f"使用账密登录: {self.phone}")
+            rsa = RSAEncrypt()
+            encrypted_mobile = rsa.encrypt(self.phone, is_password=False)
+            encrypted_password = rsa.encrypt(self.password, is_password=True)
+
+            if not encrypted_mobile or not encrypted_password:
+                self.logger.log("RSA加密失败")
+                return False
+
+            device_id = hashlib.md5(self.phone.encode()).hexdigest()
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            data = {
+                "voipToken": "citc-default-token-do-not-push",
+                "deviceBrand": "iPhone",
+                "simOperator": "--,%E4%B8%AD%E5%9B%BD%E7%A7%BB%E5%8A%A8,--,--,--",
+                "deviceId": device_id,
+                "netWay": "wifi",
+                "deviceCode": device_id,
+                "deviceOS": "15.8.3",
+                "uniqueIdentifier": device_id,
+                "latitude": "",
+                "version": "iphone_c@12.0200",
+                "pip": "192.168.5.14",
+                "isFirstInstall": "1",
+                "remark4": "",
+                "keyVersion": "2",
+                "longitude": "",
+                "simCount": "1",
+                "mobile": encrypted_mobile,
+                "isRemberPwd": "false",
+                "appId": self.app_id,
+                "reqtime": timestamp,
+                "deviceModel": "iPhone8,2",
+                "password": encrypted_password
+            }
+
+            headers = {
+                "Host": "m.client.10010.com",
+                "Content-Type": "application/x-www-form-urlencoded",
+                "User-Agent": f"ChinaUnicom4.x/12.2 (com.chinaunicom.mobilebusiness; build:44; iOS 15.8.3) Alamofire/4.7.3 unicom{{version:iphone_c@12.0200}}",
+            }
+
+            res = await self.http.request(
+                'POST',
+                'https://m.client.10010.com/mobileService/login.htm',
+                data=data,
+                headers=headers
+            )
+
+            result = res['result']
+            code = str(result.get('code', '')) if result else ''
+
+            if code in ['0', '0000']:
+                self.token_online = result.get('token_online', '')
+                self.ecs_token = result.get('ecs_token', '')
+                self.mobile = self.phone
+                self.valid = True
+                self.province = ""
+
+                # 尝试获取省份信息
+                user_list = result.get('list', [])
+                if user_list and len(user_list) > 0:
+                    self.province = user_list[0].get('proName', '')
+
+                masked_mobile = self.mobile[:3] + "****" + self.mobile[-4:]
+                self.logger.log(f"账密登录成功: {masked_mobile} (归属地: {self.province})")
+
+                # 账密登录成功后，尝试更新青龙环境变量为token格式
+                try:
+                    ql_update_cookie_to_token(self.phone, self.token_online, self.app_id)
+                except:
+                    pass  # 非青龙环境下忽略
+
+                return True
+            elif code == '2':
+                self.logger.log("密码错误，请检查登录专用密码")
+                return False
+            elif code == '11':
+                self.logger.log("未设置登录专用密码，请前往联通APP设置")
+                return False
+            elif code == 'ECS99999':
+                self.logger.log("触发安全风控，请手动登录联通APP解除")
+                return False
+            else:
+                desc = result.get('desc', '未知错误') if result else '请求失败'
+                self.logger.log(f"账密登录失败: {desc} (Code: {code})")
+                return False
+
+        except Exception as e:
+            self.logger.log(f"账密登录异常: {str(e)}")
+            return False
+
+    async def _login_with_token(self):
+        """Token登录（原online方法）"""
         try:
             # Fake device info
             device_id = "968e026d0b00180ad57dce019a59ed44ce3ef0ddd78bc3a221de273c666ec130"
@@ -869,7 +1138,8 @@ class CustomUserService:
                 await self.market_raffle()
 
             # 抽奖完成后查询奖池信息（仅展示，全局只查一次）
-            await market_raffle_state.check_prizes(self.http, self.market_token)
+            if SHOW_PRIZE_POOL:
+                await market_raffle_state.check_prizes(self.http, self.market_token)
         except Exception as e:
             self.logger.log(f"权益超市抽奖任务异常: {str(e)}")
 
@@ -1037,85 +1307,197 @@ class CustomUserService:
         except Exception as e:
             self.logger.log(f"客户日秒杀异常: {str(e)}")
 
-    # ====================  Nine Grid (九宫格)  ====================
-    async def nine_grid_draw(self):
+    # ====================  Cloud Phone (云手机)  ====================
+
+    async def wostore_cloud_task(self):
+        """云手机活动: 领券、领取抽奖次数并抽奖"""
+        target_url = "https://h5forphone.wostore.cn/cloudPhone/pageCLDPhone.html?channel_id=ST-Quanyi2&cp_id=91002997"
+        ticket_info = await self.open_plat_line_new(target_url)
+        if not ticket_info['ticket']:
+            return
+
+        # 登录获取两个 token
+        tokens = await self.wostore_cloud_login(ticket_info['ticket'])
+        if not tokens:
+            return
+
+        first_token, user_token = tokens
+
+        # 1. 先领券（完成任务前置条件）
+        await self.wostore_cloud_get_coupon(first_token)
+
+        # 2. 等待后查询任务列表（触发状态同步）
+        await asyncio.sleep(2)
+        await self.wostore_cloud_task_list(user_token)
+
+        # 3. 领取抽奖次数 (taskCode 010-2)
+        await asyncio.sleep(1)
+        await self.wostore_cloud_get_chance(user_token, "010-2")
+
+        # 4. 执行抽奖
+        await asyncio.sleep(2)
+        await self.wostore_cloud_draw(user_token)
+
+    async def wostore_cloud_login(self, ticket):
+        """使用 Ticket 登录获取 Token（两步），返回 (first_token, user_token)"""
         try:
-            current_ac_id = "AC20251202153959"
-            payload = {
-                "from": "ZXGS97000018441",
-                "acId": current_ac_id,
-                "reqSeq": self.random_string(32).lower(),
-                "imei": self.unicom_token_id.upper()
+            # Step 1: 用 ticket 换取第一个 token
+            url = "https://member.zlhz.wostore.cn/wcy_member/yunPhone/h5Awake/businessHall"
+            data = {
+                "cpId": "91002997",
+                "channelId": "ST-Quanyi2",
+                "ticket": ticket,
+                "env": "prod",
+                "transId": "4990101+底部标签-财富+499+iphone_c@12.0801",
+                "qkActId": None
             }
-            count = await self.nine_grid_check_count(payload)
-            if count <= 0:
-                self.logger.log("积分抽奖: 今日机会已用完")
-                return
             res = await self.http.request(
                 'POST',
-                'https://m.client.10010.com/welfare-mall-front/ninePalaceGrid/luckyDraw/v1',
+                url,
+                json=data,
                 headers={
-                    'Origin': 'https://img.client.10010.com',
-                    'Referer': 'https://img.client.10010.com/',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                data={'params': json.dumps(payload)}
+                    'Host': 'member.zlhz.wostore.cn',
+                    'Origin': 'https://h5forphone.wostore.cn',
+                    'Referer': f'https://h5forphone.wostore.cn/cloudPhone/pageCLDPhone.html?channel_id=ST-Quanyi2&ticket={ticket}'
+                }
             )
-            
-            result = res['result']
-            if result and str(result.get('code')) == '0':
-                await asyncio.sleep(1.5)
-                await self.nine_grid_check_win(payload)
-            else:
-                self.logger.log(f"积分抽奖失败: {result.get('msg')}")
-        except Exception as e:
-            self.logger.log(f"积分抽奖异常: {str(e)}")
 
-    async def nine_grid_check_count(self, payload):
-        try:
-            res = await self.http.request(
-                'POST',
-                'https://m.client.10010.com/welfare-mall-front/ninePalaceGrid/findLotteryCount/v1',
-                headers={
-                    'Origin': 'https://img.client.10010.com',
-                    'Referer': 'https://img.client.10010.com/',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                data={'params': json.dumps({'from': payload['from'], 'acId': payload['acId']})}
-            )
-            
             result = res['result']
-            if result and str(result.get('code')) == '0':
-                return int(result.get('resdata', {}).get('drawCount', 0))
-            return 0
+            if not (result and result.get('code') == '0'):
+                return None
+
+            # 从返回的 url 中提取 token
+            redirect_url = result.get('data', {}).get('url', '')
+            if 'token=' not in redirect_url:
+                return None
+
+            first_token = redirect_url.split('token=')[1].split('&')[0]
+
+            # Step 2: 用 first_token 换取 user_token
+            await asyncio.sleep(1)
+            login_url = "https://uphone.wostore.cn/h5api/activity-service/user/login"
+            login_data = {
+                "identityType": "cloudPhoneLogin",
+                "code": first_token,
+                "channelId": "quanyishop",
+                "activityId": "Lottery_2510",
+                "device": "device"
+            }
+            res2 = await self.http.request(
+                'POST',
+                login_url,
+                json=login_data,
+                headers={
+                    'Host': 'uphone.wostore.cn',
+                    'Origin': 'https://uphone.wostore.cn',
+                    'Referer': f'https://uphone.wostore.cn/h5/lt/October?ch=quanyishop&token={first_token}',
+                    'X-USR-TOKEN': first_token
+                }
+            )
+
+            result2 = res2['result']
+            if result2 and result2.get('code') == 200:
+                user_token = result2.get('data', {}).get('user_token')
+                return (first_token, user_token)
+            return None
+
         except:
-            return 0
+            return None
 
-    async def nine_grid_check_win(self, payload):
+    async def wostore_cloud_get_coupon(self, first_token):
+        """领券（完成任务前置条件）"""
         try:
-            res = await self.http.request(
+            url = "https://member.zlhz.wostore.cn/wcy_member/yunPhone/activity/coupon"
+            data = {
+                "activityId": "FREE_EQUITY_202504",
+                "couponId": "3000000000658742",
+                "token": first_token
+            }
+            await self.http.request(
                 'POST',
-                'https://m.client.10010.com/welfare-mall-front/ninePalaceGrid/findWinInfo/v1',
+                url,
+                json=data,
                 headers={
-                    'Origin': 'https://img.client.10010.com',
-                    'Referer': 'https://img.client.10010.com/',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                data={'params': json.dumps(payload)}
+                    'Host': 'member.zlhz.wostore.cn',
+                    'Origin': 'https://member.zlhz.wostore.cn',
+                    'Referer': f'https://member.zlhz.wostore.cn/wcy_game_vip/cloudPhone/YHQ.html?token={first_token}'
+                }
             )
-            
-            result = res['result']
-            if result and str(result.get('code')) == '0':
-                data = result.get('resdata', {})
-                prize = data.get('prizeName', '未中奖')
-                if data.get('isWin'):
-                    self.logger.log(f"积分抽奖结果: 获得 {prize}", notify=True)
-                else:
-                    self.logger.log("积分抽奖结果: 未中奖")
         except:
             pass
+
+    async def wostore_cloud_task_list(self, user_token):
+        """查询任务列表（触发状态同步）"""
+        try:
+            url = "https://uphone.wostore.cn/h5api/activity-service/user/task/list"
+            payload = {
+                "activityCode": "Lottery_2510"
+            }
+            await self.http.request(
+                'POST',
+                url,
+                json=payload,
+                headers={
+                    'Host': 'uphone.wostore.cn',
+                    'Origin': 'https://uphone.wostore.cn',
+                    'Referer': 'https://uphone.wostore.cn/h5/lt/October?ch=quanyishop',
+                    'X-USR-TOKEN': user_token
+                }
+            )
+        except:
+            pass
+
+    async def wostore_cloud_get_chance(self, user_token, task_code):
+        """领取抽奖次数"""
+        try:
+            url = "https://uphone.wostore.cn/h5api/activity-service/user/task/raffle/get"
+            payload = {
+                "activityCode": "Lottery_2510",
+                "taskCode": task_code
+            }
+            await self.http.request(
+                'POST',
+                url,
+                json=payload,
+                headers={
+                    'Host': 'uphone.wostore.cn',
+                    'Origin': 'https://uphone.wostore.cn',
+                    'Referer': 'https://uphone.wostore.cn/h5/lt/October?ch=quanyishop',
+                    'X-USR-TOKEN': user_token
+                }
+            )
+        except:
+            pass
+
+    async def wostore_cloud_draw(self, user_token):
+        """执行抽奖"""
+        try:
+            url = "https://uphone.wostore.cn/h5api/activity-service/lottery"
+            payload = {
+                "activityCode": "Lottery_2510"
+            }
+
+            res = await self.http.request(
+                'POST',
+                url,
+                json=payload,
+                headers={
+                    'Host': 'uphone.wostore.cn',
+                    'Origin': 'https://uphone.wostore.cn',
+                    'Referer': 'https://uphone.wostore.cn/h5/lt/October?ch=quanyishop',
+                    'X-USR-TOKEN': user_token
+                }
+            )
+
+            result = res['result']
+            if result and result.get('code') == 200:
+                prize_name = result.get('prizeName', '未中奖')
+                self.logger.log(f"云手机抽奖: {prize_name}", notify=True)
+        except:
+            pass
+
     # ====================  ShangDu (商都月度福利)  ====================
-    
+
     async def shangdu_task(self):
         if "河南" not in self.province:
             return
@@ -1124,7 +1506,7 @@ class CustomUserService:
             return
 
         if await self.shangdu_login(ticket):
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             await self.shangdu_signin()
 
     async def shangdu_get_ticket(self):
@@ -1156,7 +1538,7 @@ class CustomUserService:
     async def shangdu_login(self, ticket):
         try:
             url = f"https://app.shangdu.com/monthlyBenefit/v1/common/config?ticket={ticket}"
-            
+
             res = await self.http.request(
                 'GET',
                 url,
@@ -1164,11 +1546,11 @@ class CustomUserService:
                     'Host': 'app.shangdu.com',
                     'Origin': 'https://app.shangdu.com',
                     'Referer': 'https://app.shangdu.com/monthlyBenefit/index.html',
-                    'edop_flag': '0', 
+                    'edop_flag': '0',
                     'Accept': 'application/json, text/plain, */*'
                 }
             )
-            
+
             result = res['result']
             if isinstance(result, dict) and result.get('code') == '0000':
                 # self.logger.log("商都福利: 登录激活成功")
@@ -1176,10 +1558,34 @@ class CustomUserService:
             else:
                 self.logger.log(f"商都福利: 登录激活失败 {result}")
                 return False
-                
+
         except Exception as e:
             self.logger.log(f"商都福利登录异常: {str(e)}")
             return False
+
+    async def shangdu_get_sign_status(self):
+        """查询今日签到状态"""
+        try:
+            res = await self.http.request(
+                'POST',
+                'https://app.shangdu.com/monthlyBenefit/v1/signIn/queryCumulativeSignAxis',
+                headers={
+                    'Host': 'app.shangdu.com',
+                    'Origin': 'https://app.shangdu.com',
+                    'Referer': 'https://app.shangdu.com/monthlyBenefit/index.html',
+                    'edop_flag': '0',
+                    'Content-Type': 'application/json'
+                },
+                json={}
+            )
+            result = res['result']
+            if isinstance(result, dict) and result.get('code') == '0000':
+                data = result.get('data', {})
+                # todaySignFlag: '1' = 已签到, '0' = 未签到
+                return data.get('todaySignFlag') == '1'
+            return None  # 查询失败，状态未知
+        except:
+            return None
 
     async def shangdu_signin(self):
         try:
@@ -1194,32 +1600,85 @@ class CustomUserService:
                     'X-Requested-With': 'XMLHttpRequest',
                     'Content-Type': 'application/json'
                 },
-                json={} # 空 JSON 对象
+                json={}
             )
-            
-            result = res['result']
-            if isinstance(result, dict) and result.get('code') == '0000':
-                data = result.get('data', {})
-                if data.get('value') == '0001':
-                    self.logger.log("商都福利: 签到失败 (Cookie无效/未登录)")
-                    return
 
-                sign_flag = str(data.get('signFlag'))
-                prize_resp = data.get('prizeResp', {})
-                prize_name = prize_resp.get('prizeName') if prize_resp else ""
-                if not prize_name:
-                    prize_name = "未抽中"
-                
-                if sign_flag == '1':
-                    self.logger.log(f"商都福利签到成功: 获得 {prize_name}", notify=True)
+            result = res['result']
+            if isinstance(result, dict):
+                code = result.get('code')
+
+                if code == '0000':
+                    data = result.get('data', {})
+                    if data.get('value') == '0001':
+                        self.logger.log("商都福利: 签到失败 (Cookie无效/未登录)")
+                        return
+
+                    sign_flag = str(data.get('signFlag', ''))
+                    prize_resp = data.get('prizeResp', {})
+                    prize_name = prize_resp.get('prizeName') if prize_resp else ""
+
+                    if sign_flag == '1':
+                        if prize_name:
+                            self.logger.log(f"商都福利签到成功: 获得 {prize_name}", notify=True)
+                        else:
+                            self.logger.log("商都福利: 今日已签到")
+                    else:
+                        self.logger.log(f"商都福利签到成功 (signFlag={sign_flag})")
+
+                elif code == '0019':
+                    # 服务端返回重复签到，查询实际状态确认
+                    await asyncio.sleep(1)
+                    is_signed = await self.shangdu_get_sign_status()
+                    if is_signed is True:
+                        self.logger.log("商都福利: 今日已签到")
+                    elif is_signed is False:
+                        # 状态显示未签到，但返回重复签到，尝试重试一次
+                        self.logger.log("商都福利: 服务端异常(返回重复签到但实际未签)，尝试重试...")
+                        await asyncio.sleep(2)
+                        await self._shangdu_signin_retry()
+                    else:
+                        self.logger.log("商都福利: 今日已签到 (状态查询失败)")
                 else:
-                    self.logger.log(f"商都福利: 签到请求完成 (可能今日已签) {prize_name}")
-            else:
-                msg = result.get('msg') or result.get('desc') or '未知错误'
-                self.logger.log(f"商都福利签到失败: {msg}")
-                
+                    msg = result.get('msg') or result.get('desc') or ''
+                    self.logger.log(f"商都福利签到失败: {msg} (code={code})")
+
         except Exception as e:
             self.logger.log(f"商都福利签到异常: {str(e)}")
+
+    async def _shangdu_signin_retry(self):
+        """签到重试（仅内部调用）"""
+        try:
+            res = await self.http.request(
+                'POST',
+                'https://app.shangdu.com/monthlyBenefit/v1/signIn/userSignIn',
+                headers={
+                    'Host': 'app.shangdu.com',
+                    'Origin': 'https://app.shangdu.com',
+                    'Referer': 'https://app.shangdu.com/monthlyBenefit/index.html',
+                    'edop_flag': '0',
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Content-Type': 'application/json'
+                },
+                json={}
+            )
+            result = res['result']
+            if isinstance(result, dict):
+                code = result.get('code')
+                if code == '0000':
+                    data = result.get('data', {})
+                    prize_resp = data.get('prizeResp', {})
+                    prize_name = prize_resp.get('prizeName') if prize_resp else ""
+                    if prize_name:
+                        self.logger.log(f"商都福利签到成功(重试): 获得 {prize_name}", notify=True)
+                    else:
+                        self.logger.log("商都福利签到成功(重试)")
+                elif code == '0019':
+                    self.logger.log("商都福利: 重试仍返回重复签到，请检查")
+                else:
+                    msg = result.get('msg') or result.get('desc') or ''
+                    self.logger.log(f"商都福利签到重试失败: {msg}")
+        except Exception as e:
+            self.logger.log(f"商都福利签到重试异常: {str(e)}")
 
     async def user_task(self):
         #self.logger.log(f"\n------------------ 账号 {self.mobile} ------------------")
@@ -1232,7 +1691,7 @@ class CustomUserService:
         await self.market_task()
         await self.xj_task()
         await self.xj_usersday_task()
-        await self.nine_grid_draw()
+        await self.wostore_cloud_task()
         await self.shangdu_task()
 
 async def main():
