@@ -511,8 +511,8 @@ class CustomUserService:
                 'deviceModel': 'iPhone14,6',
                 'deviceOS': '16.6',
                 'deviceBrand': 'iPhone',
-                'deviceId': device_id,
-                'deviceCode': device_code,
+                #'deviceId': device_id,
+                #'deviceCode': device_code,
                 'uniqueIdentifier': unique_identifier,
                 'simOperator': '--,--,65535,65535,--@--,--,65535,65535,--',
                 'voipToken': 'citc-default-token-do-not-push'
@@ -1493,8 +1493,12 @@ class CustomUserService:
             if result and result.get('code') == 200:
                 prize_name = result.get('prizeName', '未中奖')
                 self.logger.log(f"云手机抽奖: {prize_name}", notify=True)
-        except:
-            pass
+            elif result:
+                # 抽奖失败也显示日志
+                msg = result.get('msg') or result.get('message') or result.get('data') or str(result)
+                self.logger.log(f"云手机抽奖失败: {msg}")
+        except Exception as e:
+            self.logger.log(f"云手机抽奖异常: {str(e)}")
 
     # ====================  ShangDu (商都月度福利)  ====================
 
@@ -1701,8 +1705,8 @@ async def main():
     cookies = os.environ.get("chinaUnicomCookie", "")
     if not cookies:
         print("未找到 chinaUnicomCookie 环境变量")
-        return
-        
+        return 
+    
     tasks = []
     for i, cookie in enumerate(cookies.split('@')):
         if not cookie.strip():
@@ -1713,7 +1717,7 @@ async def main():
     if tasks:
         print(f"启动 {len(tasks)} 个账号任务 (并行模式)...")
         await asyncio.gather(*tasks)
-        
+
     end_time = datetime.now()
     duration = end_time - start_time
     print(f"\n运行结束, 总用时: {duration}")

@@ -176,12 +176,38 @@ export chinaUnicomCookie="token_string@18812345678#password"
 SHOW_PRIZE_POOL = False  # 是否显示权益超市奖品池信息，默认关闭
 ```
 
-### 4. 运行脚本
+### 4. 执行模式切换
+
+脚本默认采用**并行模式**运行多个账号，如需改为**顺序执行**（一个账号完成后再执行下一个），修改 `main()` 函数：
+
+**并行模式（默认）**：
+```python
+tasks = []
+for i, cookie in enumerate(cookies.split('@')):
+    if not cookie.strip():
+        continue
+    user = CustomUserService(cookie, index=i+1)
+    tasks.append(user.user_task())
+
+if tasks:
+    await asyncio.gather(*tasks)
+```
+
+**顺序模式**：
+```python
+for i, cookie in enumerate(cookies.split('@')):
+    if not cookie.strip():
+        continue
+    user = CustomUserService(cookie, index=i+1)
+    await user.user_task()
+```
+
+### 5. 运行脚本
 ```bash
 python 中国联通.py
 ```
 
-### 5. 查看运行结果
+### 6. 查看运行结果
 脚本运行后，将在控制台输出详细的执行日志。
 - **登录状态**: 显示登录成功/失败及脱敏后的手机号（如 `138****5678`）
 - **登录方式**: 显示使用的是账密登录还是Token登录
