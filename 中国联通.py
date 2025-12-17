@@ -1014,6 +1014,7 @@ class CustomUserService:
     async def market_task(self):
         if not await self.market_login():
             return
+        await self.market_share_task()  # 分享小红书任务，获取额外抽奖机会
         await self.market_watering_task()
         await self.market_raffle_task()
 
@@ -1048,6 +1049,66 @@ class CustomUserService:
         except Exception as e:
             self.logger.log(f"权益超市登录异常: {str(e)}")
             return False
+
+    async def market_share_task(self):
+        """分享小红书任务，获取额外抽奖机会"""
+        try:
+            # 获取所有任务列表
+            res = await self.http.request(
+                'GET',
+                'https://backward.bol.wo.cn/prod-api/promotion/activityTask/getAllActivityTasks?activityId=12',
+                headers={'Authorization': f'Bearer {self.market_token}'}
+            )
+
+            result = res['result']
+            if not result or result.get('code') != 200:
+                self.logger.log(f"获取权益超市任务列表失败: {result}")
+                return
+
+            tasks = result.get('data', {}).get('activityTaskUserDetailVOList', [])
+
+            # 找到分享小红书任务 (taskType=14)
+            share_task = None
+            for task in tasks:
+                if task.get('taskType') == 14:
+                    share_task = task
+                    break
+
+            if not share_task:
+                return
+
+            # 检查任务是否已完成
+            triggered = share_task.get('triggeredTime', 0)
+            trigger_time = share_task.get('triggerTime', 1)
+            status = share_task.get('status', 0)
+
+            if status == 1 or triggered >= trigger_time:
+                return
+
+            # 获取 param1
+            param1 = share_task.get('param1')
+            if not param1:
+                self.logger.log("分享小红书任务 param1 为空")
+                return
+
+            # 调用 checkShare 接口完成任务
+            check_res = await self.http.request(
+                'POST',
+                f'https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkShare?checkKey={param1}',
+                headers={
+                    'Authorization': f'Bearer {self.market_token}',
+                    'Origin': 'https://contact.bol.wo.cn',
+                    'Referer': 'https://contact.bol.wo.cn/',
+                    'Content-Length': '0'
+                },
+                data=''
+            )
+
+            check_result = check_res['result']
+            if not check_result or check_result.get('code') != 200:
+                self.logger.log(f"分享小红书任务失败: {check_result}")
+        except Exception as e:
+            self.logger.log(f"分享小红书任务异常: {str(e)}")
 
     async def market_watering_task(self):
         try:
@@ -1088,7 +1149,7 @@ class CustomUserService:
             if result and result.get('code') == 200:
                 self.logger.log("权益超市浇花成功", notify=True)
             else:
-                self.logger.log(f"权益超市浇花失败: {result}")
+                self.logger.log(f"权益超市浇花失败: {result.get('msg', result)}")
         except Exception as e:
             self.logger.log(f"权益超市浇花异常: {str(e)}")
 
