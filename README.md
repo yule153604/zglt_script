@@ -42,7 +42,10 @@
 │   ├── 📝 日常签到 (Sign)
 │   ├── sign_task ................... 签到任务入口
 │   ├── sign_get_continuous ......... 获取签到状态
-│   └── sign_day_sign ............... 执行签到
+│   ├── sign_day_sign ............... 执行签到
+│   ├── sign_task_center ............ 任务中心(自动完成任务并领取奖励)
+│   ├── sign_do_task_from_list ...... 执行任务中心任务
+│   └── sign_get_task_reward ........ 领取任务奖励
 │   │
 │   ├── 💰 天天领现金 (TTLXJ)
 │   ├── ttlxj_task .................. 领现金任务入口
@@ -89,6 +92,35 @@
 │       ├── wostore_cloud_get_chance .. 领取抽奖次数
 │       └── wostore_cloud_draw ........ 执行抽奖
 │
+│   ├── 🔒 联通安全管家 (Security Butler)
+│   ├── security_butler_task .......... 安全管家任务入口
+│   ├── _sec_get_ticket_by_native ..... 获取Ticket
+│   ├── _sec_get_auth_token ........... 获取认证Token
+│   ├── _sec_add_to_blacklist ......... 添加黑名单任务
+│   ├── _sec_mark_phone_number ........ 号码标记任务
+│   ├── _sec_sync_address_book ........ 同步通讯录任务
+│   ├── _sec_set_interception_rules ... 设置拦截规则任务
+│   ├── _sec_view_weekly_summary ...... 查看周报任务
+│   ├── _sec_sign_in .................. 签到任务
+│   ├── _sec_receive_points ........... 领取积分
+│   └── _sec_get_user_info ............ 查询积分信息
+│
+│   └── ☁️ 联通云盘 (Cloud Disk)
+│       ├── cloud_disk_task ........... 云盘任务入口
+│       ├── _cloud_get_ticket_by_native 获取Ticket
+│       ├── _cloud_get_dispatcher ..... 获取Token
+│       ├── _cloud_get_user_info ...... 查询积分信息
+│       ├── _cloud_get_task_detail .... 获取任务详情并执行
+│       ├── _cloud_dosign ............. 签到任务
+│       ├── _cloud_activity_list ...... 浏览活动中心任务
+│       ├── _cloud_share_file ......... 分享文件任务
+│       ├── _cloud_do_upload .......... 上传文件任务
+│       ├── _cloud_do_ai_interaction .. AI通通互动任务
+│       ├── _cloud_open_album_backup .. 打开相册备份任务
+│       ├── _cloud_do_ai_query_for_lottery DeepSeek对话获取抽奖资格
+│       ├── _cloud_check_lottery_times  查询抽奖次数
+│       └── _cloud_lottery ............ 执行抽奖
+│
 └── 🚀 main (主程序入口) ............ 并发调度所有账号任务
 ```
 
@@ -101,6 +133,7 @@
 - **自动转换**: 账密登录成功后自动将环境变量更新为Token格式（青龙面板）
 
 ### 权益超市增强功能
+- **接口自动解密**: 自动处理权益超市接口的 AES 加密响应，修复任务列表获取失败的问题
 - **分享任务自动完成**: 自动完成分享小红书任务，获取额外抽奖机会
 - **每日自动抽奖**: 无条件执行抽奖，不受奖池状态影响
 - **奖池信息展示**: 可选功能，抽奖完成后展示今日奖池信息（默认关闭）
@@ -114,13 +147,31 @@
 - **任务状态同步**: 自动触发任务状态同步，确保可领取抽奖次数
 - **每日抽奖**: 完成任务后自动执行抽奖
 
+### 签到区-任务中心
+- **任务自动完成**: 自动浏览任务页面并完成任务
+- **奖励自动领取**: 任务完成后自动领取奖励
+- **循环执行**: 持续执行直到所有可完成任务都已处理
+
+### 联通安全管家
+- **每日签到**: 自动完成安全管家签到任务
+- **积分任务**: 自动完成添加黑名单、号码标记、同步通讯录、骚扰拦截设置、查看周报等任务
+- **积分领取**: 任务完成后自动领取积分奖励
+- **积分统计**: 显示本次运行获得的积分数量
+
+### 联通云盘
+- **每日签到**: 自动完成云盘签到任务
+- **多项任务**: 支持浏览活动中心、分享文件、上传文件、AI通通互动、打开相册备份等任务
+- **积分领取**: 任务完成后自动领取积分奖励
+- **DeepSeek抽奖**: 通过DeepSeek对话获取抽奖资格并自动抽奖
+- **积分统计**: 显示本次运行获得的积分数量
+
 ## 🚀 快速开始
 
 ### 1. 安装依赖
 ```bash
 pip install httpx
 
-# 如需使用账密登录，还需安装：
+# 必需安装（用于权益超市接口解密及账密登录）：
 pip install pycryptodome
 ```
 
