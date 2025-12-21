@@ -36,6 +36,12 @@ APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
 CLIENT_ID_2 = "1001000003"
 ANOTHER_API_KEY = "beea1c7edf7c4989b2d3621c4255132f"
+
+# ====================  Woread Constants  ====================
+WOREAD_PRODUCT_ID = "10000002"
+WOREAD_SECRET_KEY = "7k1HcDL8RKvc"
+WOREAD_PASSWORD = "woreadst^&*12345"
+WOREAD_IV = "16-Bytes--String"
 ANOTHER_ENCRYPTION_KEY = "f4cd4ffeb5554586acf65ba7110534f5"
 SERVICE_LIFE = "wocareMBHServiceLife1"
 MIN_RETRIES = "1"
@@ -2536,7 +2542,8 @@ class CustomUserService:
             )
             result = res['result']
             if result and '0000' in str(result.get('code', '')) and result.get('data', {}).get('score'):
-                self.logger.log(f"云盘签到: +{result['data']['score']}积分")
+                #self.logger.log(f"云盘签到: +{result['data']['score']}积分")
+                pass
             elif result:
                 self.logger.log(f"云盘签到失败: {result.get('msg', result)}")
         except Exception as e:
@@ -2578,8 +2585,8 @@ class CustomUserService:
                     if match:
                         score = int(match.group(1))
 
-                if score > 0:
-                    self.logger.log(f"云盘任务: +{score}积分")
+                #if score > 0:
+                    #self.logger.log(f"云盘任务: +{score}积分")
                 return True
             else:
                 self.logger.log(f"云盘领取奖励失败: {result}")
@@ -3059,6 +3066,279 @@ class CustomUserService:
         except Exception as e:
             self.logger.log(f"商都福利签到重试异常: {str(e)}")
 
+    # ====================  Woread (联通阅读)  ====================
+
+    def _woread_encode(self, data, password=WOREAD_PASSWORD):
+        """联通阅读AES-CBC加密"""
+        if not HAS_CRYPTO:
+            return ""
+        try:
+            text = json.dumps(data, separators=(',', ':')) if isinstance(data, (dict, list)) else str(data)
+            key = password.encode('utf-8')
+            iv = WOREAD_IV.encode('utf-8')
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            encrypted = cipher.encrypt(pad(text.encode('utf-8'), AES.block_size))
+            return base64.b64encode(encrypted).decode('utf-8')
+        except Exception as e:
+            self.logger.log(f"联通阅读加密异常: {str(e)}")
+            return ""
+
+    async def woread_auth(self):
+        """联通阅读: 设备预登录获取accesstoken"""
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
+            sign_str = f"{WOREAD_PRODUCT_ID}{timestamp}{WOREAD_SECRET_KEY}"
+            md5_hash = hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+
+            data = {
+                'deviceId': self.random_string(32, '0123456789abcdef'),
+                'deviceType': '1',
+                'clientVersion': '6.0.0'
+            }
+            encrypted_data = self._woread_encode(data)
+
+            res = await self.http.request(
+                'POST',
+                f'https://10010.woread.com.cn/ng_woread_service/rest/app/auth/{WOREAD_PRODUCT_ID}/{timestamp}/{md5_hash}',
+                headers={
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+
+            result = res['result']
+            if result and str(result.get('code')) == '0':
+                self.woread_accesstoken = result.get('accesstoken', '')
+                return True
+            return False
+        except Exception as e:
+            self.logger.log(f"联通阅读预登录异常: {str(e)}")
+            return False
+
+    async def woread_login(self):
+        """联通阅读: 账号登录"""
+        try:
+            if not await self.woread_auth():
+                return False
+
+            data = {
+                'phone': self.mobile,
+                'token': self.token_online,
+                'productId': WOREAD_PRODUCT_ID,
+                'time': datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
+            }
+            encrypted_data = self._woread_encode(data)
+
+            res = await self.http.request(
+                'POST',
+                'https://10010.woread.com.cn/ng_woread_service/rest/account/login',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+
+            result = res['result']
+            if result and str(result.get('code')) == '0':
+                self.woread_usertoken = result.get('usertoken', '')
+                return True
+            else:
+                msg = result.get('msg', '') if result else '请求失败'
+                self.logger.log(f"联通阅读登录失败: {msg}")
+                return False
+        except Exception as e:
+            self.logger.log(f"联通阅读登录异常: {str(e)}")
+            return False
+
+    async def woread_get_book_info(self):
+        """联通阅读: 获取书籍信息"""
+        try:
+            res = await self.http.request(
+                'GET',
+                'https://10010.woread.com.cn/ng_woread_service/rest/basics/recommposdetail/14856',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'usertoken': self.woread_usertoken,
+                    'User-Agent': 'okhttp/3.14.9'
+                }
+            )
+
+            result = res['result']
+            if result and str(result.get('code')) == '0':
+                return result.get('recommPos', {})
+            return None
+        except Exception as e:
+            self.logger.log(f"联通阅读获取书籍异常: {str(e)}")
+            return None
+
+    async def woread_read_process(self):
+        """联通阅读: 阅读任务（模拟阅读）"""
+        try:
+            book_info = await self.woread_get_book_info()
+            if not book_info:
+                self.logger.log("联通阅读: 获取书籍信息失败")
+                return
+
+            book_id = book_info.get('bookId', '978752838809620240101')
+            chapter_id = book_info.get('chapterId', '978752838809620240101001')
+
+            # 获取章节列表
+            data = {'bookId': book_id, 'chapterId': chapter_id, 'pageNo': 1, 'pageSize': 20}
+            encrypted_data = self._woread_encode(data)
+
+            res = await self.http.request(
+                'POST',
+                'https://10010.woread.com.cn/ng_woread_service/rest/cnt/chalist',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'usertoken': self.woread_usertoken,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+
+            result = res['result']
+            if not result or str(result.get('code')) != '0':
+                self.logger.log("联通阅读: 获取章节列表失败")
+                return
+
+            chapters = result.get('list', [])
+            if not chapters:
+                return
+
+            # 模拟阅读3次
+            for i in range(3):
+                await asyncio.sleep(3)
+                chapter = chapters[i % len(chapters)]
+                await self._woread_heartbeat(book_id, chapter.get('chapterId', chapter_id))
+
+            # 添加阅读时长
+            await self._woread_add_read_time(book_id, chapter_id)
+
+        except Exception as e:
+            self.logger.log(f"联通阅读阅读任务异常: {str(e)}")
+
+    async def _woread_heartbeat(self, book_id, chapter_id):
+        """联通阅读: 阅读心跳"""
+        try:
+            words_detail = [{'chapterId': chapter_id, 'words': random.randint(500, 1500)}]
+            data = {
+                'bookId': book_id,
+                'chapterId': chapter_id,
+                'wordsDetail': words_detail,
+                'readTime': random.randint(60, 180)
+            }
+            encrypted_data = self._woread_encode(data)
+
+            await self.http.request(
+                'POST',
+                'https://10010.woread.com.cn/ng_woread_service/rest/history/heartbeat',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'usertoken': self.woread_usertoken,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+        except:
+            pass
+
+    async def _woread_add_read_time(self, book_id, chapter_id):
+        """联通阅读: 添加阅读时长"""
+        try:
+            data = {
+                'bookId': book_id,
+                'chapterId': chapter_id,
+                'readTime': random.randint(300, 600)
+            }
+            encrypted_data = self._woread_encode(data)
+
+            await self.http.request(
+                'POST',
+                'https://10010.woread.com.cn/ng_woread_service/rest/history/addReadTime',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'usertoken': self.woread_usertoken,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+        except:
+            pass
+
+    async def woread_draw_new(self):
+        """联通阅读: 抽奖"""
+        try:
+            data = {'activeindex': '8051'}
+            encrypted_data = self._woread_encode(data)
+
+            res = await self.http.request(
+                'POST',
+                'https://10010.woread.com.cn/ng_woread_service/rest/basics/doDraw',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'usertoken': self.woread_usertoken,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+
+            result = res['result']
+            if result and str(result.get('code')) == '0':
+                prize = result.get('giftname', '未知奖品')
+                self.logger.log(f"联通阅读抽奖: {prize}", notify=True)
+            else:
+                msg = result.get('msg', '') if result else '请求失败'
+                if '已抽' in msg or '次数' in msg:
+                    self.logger.log(f"联通阅读: {msg}")
+                else:
+                    self.logger.log(f"联通阅读抽奖失败: {msg}")
+        except Exception as e:
+            self.logger.log(f"联通阅读抽奖异常: {str(e)}")
+
+    async def woread_queryTicketAccount(self):
+        """联通阅读: 查询话费红包余额"""
+        try:
+            data = {'type': '1'}
+            encrypted_data = self._woread_encode(data)
+
+            res = await self.http.request(
+                'POST',
+                'https://10010.woread.com.cn/ng_woread_service/rest/phone/vouchers/queryTicketAccount',
+                headers={
+                    'accesstoken': self.woread_accesstoken,
+                    'usertoken': self.woread_usertoken,
+                    'Content-Type': 'text/plain;charset=UTF-8',
+                    'User-Agent': 'okhttp/3.14.9'
+                },
+                data=encrypted_data
+            )
+
+            result = res['result']
+            if result and str(result.get('code')) == '0':
+                balance = result.get('balance', 0)
+                self.logger.log(f"联通阅读话费红包余额: {float(balance)/100:.2f}元", notify=True)
+        except Exception as e:
+            self.logger.log(f"联通阅读查询余额异常: {str(e)}")
+
+    async def woread_task(self):
+        """联通阅读任务入口"""
+        if not await self.woread_login():
+            return
+
+        await self.woread_read_process()
+        await asyncio.sleep(3)
+        await self.woread_draw_new()
+        await asyncio.sleep(3)
+        await self.woread_queryTicketAccount()
+
     async def user_task(self):
         #self.logger.log(f"\n------------------ 账号 {self.mobile} ------------------")
         if not await self.online():
@@ -3073,6 +3353,7 @@ class CustomUserService:
         await self.security_butler_task()
         await self.cloud_disk_task()
         await self.shangdu_task()
+        await self.woread_task()
 
 async def main():
     start_time = datetime.now()
