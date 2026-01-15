@@ -40,7 +40,7 @@ QLAPI = _QLAPIStub()  # 青龙环境会覆盖此变量
 
 # ====================  Constants  ====================
 APP_VERSION = "iphone_c@11.0503"
-SHOW_PRIZE_POOL = False  # 是否显示权益超市奖品池信息，默认关闭
+SHOW_PRIZE_POOL = True  # 是否显示权益超市奖品池信息，默认关闭
 USER_AGENT = f"Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{{version:{APP_VERSION}}}"
 APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922869a8d2313b6f2f9f3b57f2901f0021c4575e4b6949ae18b7f6761d465c12321788dcd980aa1a641789d1188bb"
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
@@ -209,12 +209,8 @@ class MarketRaffleState:
                     print(f"\n{'=' * 60}")
                     if valid_count > 0:
                         self.has_prizes = True
-                        print(
-                            f"结论: 当前已放水！有效奖品 {valid_count}/{total} 个，可以抽奖"
-                        )
                     else:
                         self.has_prizes = False
-                        print("结论: 当前未放水！无有效奖品，跳过抽奖")
                     print("=" * 60 + "\n")
                 else:
                     print(f"奖品池查询失败: {result}")
@@ -222,7 +218,6 @@ class MarketRaffleState:
             except Exception as e:
                 print(f"奖品池查询异常: {str(e)}")
                 self.has_prizes = False
-
             self.checked = True
             return self.has_prizes
 
@@ -1142,7 +1137,7 @@ class CustomUserService:
                     count = int(data.get("mhRaffleCountValue", 0))
 
                 for _ in range(count):
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(3)
                     await self.wocare_luck_draw(task_info, group_id)
             else:
                 self.logger.log(f"联通祝福[{task_info['name']}]查询活动失败: {result}")
@@ -1415,7 +1410,7 @@ class CustomUserService:
             return
 
         if await self.xj_get_token(ticket_info["ticket"]):
-            await self.xj_do_draw("Dec2025Act")
+            await self.xj_do_draw("Jan2026Act")
 
     async def xj_get_token(self, ticket):
         try:
@@ -1441,7 +1436,7 @@ class CustomUserService:
             self.logger.log(f"新疆联通获取Token异常: {str(e)}")
             return False
 
-    async def xj_do_draw(self, activity_id="dakaDec2025Act"):
+    async def xj_do_draw(self, activity_id="dakaJan2026Act"):
         try:
             prize_dict = {
                 "5Gksjhjhyyk": "5G宽视界黄金会员-月卡",
@@ -1458,7 +1453,7 @@ class CustomUserService:
 
             res = await self.http.request(
                 "POST",
-                "https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_Dec2025Act",
+                "https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_Jan2026Act",
                 headers={
                     "userToken": self.xj_token,
                     "X-Requested-With": "XMLHttpRequest",
@@ -1542,8 +1537,8 @@ class CustomUserService:
     # ====================  Cloud Phone (云手机)  ====================
 
     async def wostore_cloud_task(self):
-        """云手机活动: 领券、领取抽奖次数并抽奖"""
-        target_url = "https://h5forphone.wostore.cn/cloudPhone/pageCLDPhone.html?channel_id=ST-Quanyi2&cp_id=91002997"
+        """云手机活动: 积分签到、领取抽奖次数并抽奖"""
+        target_url = "https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id=ST-Zujian001-gs&cp_id=91002997"
         ticket_info = await self.open_plat_line_new(target_url)
         if not ticket_info["ticket"]:
             return
@@ -1555,16 +1550,16 @@ class CustomUserService:
 
         first_token, user_token = tokens
 
-        # 1. 先领券（完成任务前置条件）
-        await self.wostore_cloud_get_coupon(first_token)
+        # 1. 积分签到（完成任务前置条件）
+        await self.wostore_cloud_sign(user_token)
 
         # 2. 等待后查询任务列表（触发状态同步）
         await asyncio.sleep(2)
         await self.wostore_cloud_task_list(user_token)
 
-        # 3. 领取抽奖次数 (taskCode 010-2)
+        # 3. 领取抽奖次数 (taskCode 2508-01 "去赚积分")
         await asyncio.sleep(1)
-        await self.wostore_cloud_get_chance(user_token, "010-2")
+        await self.wostore_cloud_get_chance(user_token, "2508-01")
 
         # 4. 执行抽奖
         await asyncio.sleep(2)
@@ -1577,10 +1572,10 @@ class CustomUserService:
             url = "https://member.zlhz.wostore.cn/wcy_member/yunPhone/h5Awake/businessHall"
             data = {
                 "cpId": "91002997",
-                "channelId": "ST-Quanyi2",
+                "channelId": "ST-Zujian001-gs",
                 "ticket": ticket,
                 "env": "prod",
-                "transId": "4990101+底部标签-财富+499+iphone_c@12.0801",
+                "transId": "S2ndpage1235+开福袋！+F1+CJDD00D0001+iphone_c@12.0801",
                 "qkActId": None,
             }
             res = await self.http.request(
@@ -1590,7 +1585,7 @@ class CustomUserService:
                 headers={
                     "Host": "member.zlhz.wostore.cn",
                     "Origin": "https://h5forphone.wostore.cn",
-                    "Referer": f"https://h5forphone.wostore.cn/cloudPhone/pageCLDPhone.html?channel_id=ST-Quanyi2&ticket={ticket}",
+                    "Referer": f"https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id=ST-Zujian001-gs&ticket={ticket}",
                 },
             )
 
@@ -1611,8 +1606,8 @@ class CustomUserService:
             login_data = {
                 "identityType": "cloudPhoneLogin",
                 "code": first_token,
-                "channelId": "quanyishop",
-                "activityId": "Lottery_2510",
+                "channelId": "ST-Zujian001-gs",
+                "activityId": "Lottery_251201",
                 "device": "device",
             }
             res2 = await self.http.request(
@@ -1622,7 +1617,7 @@ class CustomUserService:
                 headers={
                     "Host": "uphone.wostore.cn",
                     "Origin": "https://uphone.wostore.cn",
-                    "Referer": f"https://uphone.wostore.cn/h5/lt/October?ch=quanyishop&token={first_token}",
+                    "Referer": f"https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs&token={first_token}",
                     "X-USR-TOKEN": first_token,
                 },
             )
@@ -1636,33 +1631,33 @@ class CustomUserService:
         except Exception:
             return None
 
-    async def wostore_cloud_get_coupon(self, first_token):
-        """领券（完成任务前置条件）"""
+    async def wostore_cloud_sign(self, user_token):
+        """积分签到（完成任务前置条件）"""
         try:
-            url = "https://member.zlhz.wostore.cn/wcy_member/yunPhone/activity/coupon"
-            data = {
-                "activityId": "FREE_EQUITY_202504",
-                "couponId": "3000000000658742",
-                "token": first_token,
-            }
-            await self.http.request(
+            url = "https://uphone.wostore.cn/h5api/activity-service/points/v1/sign"
+            data = {"activityCode": "Points_Sign_2507"}
+            res = await self.http.request(
                 "POST",
                 url,
                 json=data,
                 headers={
-                    "Host": "member.zlhz.wostore.cn",
-                    "Origin": "https://member.zlhz.wostore.cn",
-                    "Referer": f"https://member.zlhz.wostore.cn/wcy_game_vip/cloudPhone/YHQ.html?token={first_token}",
+                    "Host": "uphone.wostore.cn",
+                    "Origin": "https://uphone.wostore.cn",
+                    "Referer": "https://uphone.wostore.cn/h5/lt/points",
+                    "X-USR-TOKEN": user_token,
                 },
             )
+            result = res["result"]
+            if result and result.get("code") == 200:
+                self.logger.log(f"云手机积分签到: {result.get('msg', '成功')}")
         except Exception as e:
-            self.logger.log(f"云手机领券异常: {str(e)}")
+            self.logger.log(f"云手机积分签到异常: {str(e)}")
 
     async def wostore_cloud_task_list(self, user_token):
         """查询任务列表（触发状态同步）"""
         try:
             url = "https://uphone.wostore.cn/h5api/activity-service/user/task/list"
-            payload = {"activityCode": "Lottery_2510"}
+            payload = {"activityCode": "Lottery_251201"}
             await self.http.request(
                 "POST",
                 url,
@@ -1670,7 +1665,7 @@ class CustomUserService:
                 headers={
                     "Host": "uphone.wostore.cn",
                     "Origin": "https://uphone.wostore.cn",
-                    "Referer": "https://uphone.wostore.cn/h5/lt/October?ch=quanyishop",
+                    "Referer": "https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs",
                     "X-USR-TOKEN": user_token,
                 },
             )
@@ -1683,7 +1678,7 @@ class CustomUserService:
             url = (
                 "https://uphone.wostore.cn/h5api/activity-service/user/task/raffle/get"
             )
-            payload = {"activityCode": "Lottery_2510", "taskCode": task_code}
+            payload = {"activityCode": "Lottery_251201", "taskCode": task_code}
             await self.http.request(
                 "POST",
                 url,
@@ -1691,7 +1686,7 @@ class CustomUserService:
                 headers={
                     "Host": "uphone.wostore.cn",
                     "Origin": "https://uphone.wostore.cn",
-                    "Referer": "https://uphone.wostore.cn/h5/lt/October?ch=quanyishop",
+                    "Referer": "https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs",
                     "X-USR-TOKEN": user_token,
                 },
             )
@@ -1702,7 +1697,7 @@ class CustomUserService:
         """执行抽奖"""
         try:
             url = "https://uphone.wostore.cn/h5api/activity-service/lottery"
-            payload = {"activityCode": "Lottery_2510"}
+            payload = {"activityCode": "Lottery_251201"}
 
             res = await self.http.request(
                 "POST",
@@ -1711,7 +1706,7 @@ class CustomUserService:
                 headers={
                     "Host": "uphone.wostore.cn",
                     "Origin": "https://uphone.wostore.cn",
-                    "Referer": "https://uphone.wostore.cn/h5/lt/October?ch=quanyishop",
+                    "Referer": "https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs",
                     "X-USR-TOKEN": user_token,
                 },
             )
@@ -1893,10 +1888,10 @@ class CustomUserService:
                 self.logger.log("安全管家获取票据失败，跳过任务")
                 return
 
-            await asyncio.sleep(5)
+            await asyncio.sleep(1)
             await self._sec_get_user_info()  # 获取初始积分
             await self._sec_execute_all_tasks()
-            await asyncio.sleep(15)
+            await asyncio.sleep(3)
             await self._sec_get_user_info()  # 获取最终积分
 
         except Exception as e:
@@ -2297,7 +2292,7 @@ class CustomUserService:
                                 break
                             else:
                                 await self._sec_finish_task(task_code, task_name)
-                                await asyncio.sleep(10)
+                                await asyncio.sleep(3)
                                 await self._sec_receive_points(task_code)
                         except Exception:
                             break
@@ -2345,747 +2340,6 @@ class CustomUserService:
                     )
         except Exception as e:
             self.logger.log(f"安全管家获取积分异常: {str(e)}")
-
-    async def cloud_disk_task(self):
-        """联通云盘任务: 签到、任务、抽奖"""
-        try:
-            if not self.ecs_token or not self.mobile:
-                return
-
-            self.cloud_disk = {}
-            self.cloud_disk_urls = {
-                "getTicketByNative": "https://m.client.10010.com/edop_ng/getTicketByNative",
-                "ltypDispatcher": "https://panservice.mail.wo.cn/wohome/dispatcher",
-                "userticket": "https://panservice.mail.wo.cn/api-user/api/user/ticket",
-                "userInfo": "https://m.jf.10010.com/jf-external-application/jftask/userInfo",
-                "taskDetail": "https://m.jf.10010.com/jf-external-application/jftask/taskDetail",
-                "dosign": "https://m.jf.10010.com/jf-external-application/jftask/sign",
-                "toFinish": "https://m.jf.10010.com/jf-external-application/jftask/toFinish",
-                "doPopUp": "https://m.jf.10010.com/jf-external-application/jftask/popUp",
-                "doUpload": "https://b.smartont.net/openapi/transfer/quickTransfer",
-                "activityList": "https://panservice.mail.wo.cn/activity/v1/activityList",
-                "ai_query": "https://panservice.mail.wo.cn/wohome/ai/assistant/query",
-                "lottery_times": "https://panservice.mail.wo.cn/activity/lottery/lottery-times",
-                "lottery": "https://panservice.mail.wo.cn/activity/lottery",
-            }
-
-            # 获取ticket
-            ticket = await self._cloud_get_ticket_by_native()
-            if not ticket:
-                return
-
-            # 获取token
-            token = await self._cloud_get_dispatcher(ticket)
-            if not token:
-                return
-
-            await asyncio.sleep(0.5)
-            await self._cloud_get_user_info()  # 初始积分
-            await asyncio.sleep(0.5)
-            await self._cloud_get_task_detail()
-
-            # AI对话获取抽奖资格
-            got_chance = await self._cloud_do_ai_query_for_lottery()
-            if got_chance:
-                await asyncio.sleep(5)
-                times = await self._cloud_check_lottery_times()
-                for i in range(times):
-                    await self._cloud_lottery("MjI=")
-                    await asyncio.sleep(5)
-
-            await asyncio.sleep(0.5)
-            await self._cloud_get_user_info()  # 最终积分
-
-        except Exception as e:
-            self.logger.log(f"云盘任务异常: {str(e)}")
-
-    async def _cloud_get_ticket_by_native(self):
-        """云盘: 获取ticket"""
-        try:
-            res = await self.http.request(
-                "GET",
-                f"{self.cloud_disk_urls['getTicketByNative']}?appId=edop_unicom_d67b3e30&token={self.ecs_token}",
-                headers={
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                    "Connection": "Keep-Alive",
-                },
-            )
-            result = res["result"]
-            if result and result.get("ticket"):
-                self.cloud_disk["ticket"] = result["ticket"]
-                return result["ticket"]
-            return None
-        except Exception:
-            return None
-
-    async def _cloud_get_dispatcher(self, ticket):
-        """云盘: 获取token"""
-        try:
-            timestamp = str(int(time.time() * 1000))
-            req_seq = random.randint(123456, 199999)
-            string_to_hash = f"HandheldHallAutoLoginV2{timestamp}{req_seq}wohome"
-            md5_hash = hashlib.md5(string_to_hash.encode()).hexdigest()
-
-            payload = {
-                "header": {
-                    "key": "HandheldHallAutoLoginV2",
-                    "resTime": timestamp,
-                    "reqSeq": req_seq,
-                    "channel": "wohome",
-                    "version": "",
-                    "sign": md5_hash,
-                },
-                "body": {"clientId": "1001000003", "ticket": ticket},
-            }
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["ltypDispatcher"],
-                json=payload,
-                headers={
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}"
-                },
-            )
-            result = res["result"]
-            token = (
-                result.get("RSP", {}).get("DATA", {}).get("token") if result else None
-            )
-            if token:
-                self.cloud_disk["userToken"] = token
-                return token
-            return None
-        except Exception as e:
-            self.logger.log(f"云盘获取token异常: {str(e)}")
-            return None
-
-    async def _cloud_get_userticket(self, is_changer=False):
-        """云盘: 获取userticket"""
-        if not self.cloud_disk.get("userToken"):
-            return None
-
-        try:
-            if is_changer:
-                headers = {
-                    "User-Agent": "LianTongYunPan/4.0.4 (Android 12)",
-                    "app-type": "liantongyunpanapp",
-                    "Client-Id": "1001000035",
-                    "App-Version": "yp-app/4.0.4",
-                    "Sys-Version": "Android/12",
-                    "X-YP-Client-Id": "1001000035",
-                    "X-YP-Access-Token": self.cloud_disk["userToken"],
-                }
-            else:
-                headers = {
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                    "Content-Type": "application/json",
-                    "X-YP-Access-Token": self.cloud_disk["userToken"],
-                    "accesstoken": self.cloud_disk["userToken"],
-                    "token": self.cloud_disk["userToken"],
-                    "clientId": "1001000003",
-                    "X-YP-Client-Id": "1001000003",
-                    "source-type": "woapi",
-                    "app-type": "unicom",
-                }
-
-            res = await self.http.request(
-                "POST", self.cloud_disk_urls["userticket"], json={}, headers=headers
-            )
-            result = res["result"]
-            ticket = result.get("result", {}).get("ticket") if result else None
-            if ticket:
-                self.cloud_disk["userticket"] = ticket
-                await asyncio.sleep(1)
-                return ticket
-            return None
-        except Exception:
-            return None
-
-    async def _cloud_get_user_info(self):
-        """云盘: 获取用户积分信息"""
-        if not await self._cloud_get_userticket(False):
-            return
-
-        try:
-            headers = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                "ticket": self.cloud_disk.get("userticket", ""),
-                "content-type": "application/json;charset=UTF-8",
-                "partnersid": "1649",
-                "origin": "https://m.jf.10010.com",
-                "clienttype": "yunpan_android",
-                "x-requested-with": "com.sinovatech.unicom.ui",
-            }
-            if self.cloud_disk.get("jeaId"):
-                headers["Cookie"] = f"_jea_id={self.cloud_disk['jeaId']}"
-
-            res = await self.http.request(
-                "POST", self.cloud_disk_urls["userInfo"], json={}, headers=headers
-            )
-            result = res["result"]
-
-            # 从响应头获取jeaId
-            res_headers = res.get("headers", {})
-            set_cookie = res_headers.get("set-cookie") or res_headers.get("Set-Cookie")
-            if set_cookie:
-                cookies = set_cookie if isinstance(set_cookie, list) else [set_cookie]
-                for cookie in cookies:
-                    if cookie and cookie.startswith("_jea_id="):
-                        self.cloud_disk["jeaId"] = cookie.split(";")[0].split("=")[1]
-                        break
-
-            if result and result.get("data") and result["data"].get("availableScore"):
-                _available_score = result["data"]["availableScore"]  # noqa: F841
-                all_earn_score = result["data"].get("allEarnScore", 0)
-                if "initial_score" not in self.cloud_disk:
-                    self.cloud_disk["initial_score"] = int(all_earn_score)
-                else:
-                    earned = int(all_earn_score) - self.cloud_disk["initial_score"]
-                    if earned > 0:
-                        self.logger.log(f"云盘任务: 本次获得{earned}积分", notify=True)
-        except Exception as e:
-            self.logger.log(f"云盘获取用户信息异常: {str(e)}")
-
-    async def _cloud_get_task_detail(self):
-        """云盘: 获取任务详情并执行"""
-        if not await self._cloud_get_userticket(False):
-            return
-
-        try:
-            headers = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                "ticket": self.cloud_disk.get("userticket", ""),
-                "content-type": "application/json;charset=UTF-8",
-                "partnersid": "1649",
-                "origin": "https://m.jf.10010.com",
-                "clienttype": "yunpan_android",
-                "x-requested-with": "com.sinovatech.unicom.ui",
-            }
-            if self.cloud_disk.get("jeaId"):
-                headers["Cookie"] = f"_jea_id={self.cloud_disk['jeaId']}"
-
-            res = await self.http.request(
-                "POST", self.cloud_disk_urls["taskDetail"], json={}, headers=headers
-            )
-            result = res["result"]
-            if (
-                not result
-                or not result.get("data")
-                or not result["data"].get("taskDetail")
-            ):
-                return
-
-            task_list = result["data"]["taskDetail"].get("taskList", [])
-            task_names = [
-                "浏览活动中心",
-                "分享文件",
-                "签到",
-                "与AI通通互动",
-                "打开相册自动备份",
-            ]
-
-            for task in task_list:
-                await asyncio.sleep(0.5)
-                task_name = task.get("taskName", "")
-                task_code = task.get("taskCode", "")
-                finish_text = task.get("finishText", "")
-
-                if finish_text == "未完成" and any(
-                    name in task_name for name in task_names
-                ):
-                    if "浏览活动中心" in task_name:
-                        await self._cloud_to_finish(task_code, task_name, True)
-                        await self._cloud_activity_list(task_code, task_name)
-                    elif "分享文件" in task_name:
-                        await self._cloud_to_finish(task_code, task_name, False)
-                        await self._cloud_share_file(task_code, task_name)
-                    elif "签到" in task_name:
-                        await self._cloud_to_finish(task_code, task_name, False)
-                        await self._cloud_dosign(task_code, task_name)
-                    elif "与AI通通互动" in task_name:
-                        await self._cloud_to_finish(task_code, task_name, False)
-                        await self._cloud_do_ai_interaction(task_code, task_name)
-                    elif "打开相册自动备份" in task_name:
-                        await self._cloud_to_finish(task_code, task_name, False)
-                        await self._cloud_open_album_backup(task_code, task_name)
-
-                # 手动上传文件任务
-                if finish_text == "未完成" and "手动上传文件" in task_name:
-                    subtitle = task.get("taskNameSubtitle", "")
-                    if subtitle:
-                        await self._cloud_to_finish(task_code, task_name, False)
-                        import re
-
-                        match = re.search(
-                            r"(\d+)/(\d+)",
-                            subtitle.replace("（", "(").replace("）", ")"),
-                        )
-                        if match:
-                            current_count = int(match.group(1))
-                            target_count = int(match.group(2))
-                            remaining = target_count - current_count
-                            for i in range(remaining):
-                                if await self._cloud_do_upload(task_code, task_name):
-                                    await asyncio.sleep(0.5)
-                                else:
-                                    break
-
-        except Exception as e:
-            self.logger.log(f"云盘获取任务详情异常: {str(e)}")
-
-    async def _cloud_to_finish(self, task_code, task_name, is_changer):
-        """云盘: 开始任务"""
-        if not await self._cloud_get_userticket(is_changer):
-            return False
-
-        try:
-            headers = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                "ticket": self.cloud_disk.get("userticket", ""),
-                "content-type": "application/json;charset=UTF-8",
-                "partnersid": "1649",
-                "origin": "https://m.jf.10010.com",
-                "clienttype": "yunpan_android",
-                "x-requested-with": "com.sinovatech.unicom.ui",
-            }
-            if is_changer:
-                headers["clienttype"] = "yunpan_unicom_applet"
-            if self.cloud_disk.get("jeaId"):
-                headers["Cookie"] = f"_jea_id={self.cloud_disk['jeaId']}"
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["toFinish"],
-                json={"taskCode": task_code},
-                headers=headers,
-            )
-            result = res["result"]
-            if result and result.get("code") == "0000":
-                return True
-            return False
-        except Exception:
-            return False
-
-    async def _cloud_dosign(self, task_code, task_name):
-        """云盘: 签到"""
-        if not await self._cloud_get_userticket(False):
-            return
-
-        try:
-            headers = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                "ticket": self.cloud_disk.get("userticket", ""),
-                "content-type": "application/json;charset=UTF-8",
-                "partnersid": "1649",
-                "origin": "https://m.jf.10010.com",
-                "clienttype": "yunpan_android",
-                "x-requested-with": "com.sinovatech.unicom.ui",
-            }
-            if self.cloud_disk.get("jeaId"):
-                headers["Cookie"] = f"_jea_id={self.cloud_disk['jeaId']}"
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["dosign"],
-                json={"taskCode": task_code},
-                headers=headers,
-            )
-            result = res["result"]
-            if (
-                result
-                and "0000" in str(result.get("code", ""))
-                and result.get("data", {}).get("score")
-            ):
-                # self.logger.log(f"云盘签到: +{result['data']['score']}积分")
-                pass
-            elif result:
-                self.logger.log(f"云盘签到失败: {result.get('msg', result)}")
-        except Exception as e:
-            self.logger.log(f"云盘签到异常: {str(e)}")
-
-    async def _cloud_do_popup(self, task_code, task_name, is_changer):
-        """云盘: 领取奖励"""
-        if not await self._cloud_get_userticket(is_changer):
-            return False
-
-        await asyncio.sleep(5.5)
-
-        try:
-            headers = {
-                "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                "ticket": self.cloud_disk.get("userticket", ""),
-                "content-type": "application/json;charset=UTF-8",
-                "partnersid": "1649",
-                "origin": "https://m.jf.10010.com",
-                "clienttype": "yunpan_android"
-                if not is_changer
-                else "yunpan_unicom_applet",
-                "x-requested-with": "com.sinovatech.unicom.ui",
-            }
-            if self.cloud_disk.get("jeaId"):
-                headers["Cookie"] = f"_jea_id={self.cloud_disk['jeaId']}"
-
-            res = await self.http.request(
-                "POST", self.cloud_disk_urls["doPopUp"], json={}, headers=headers
-            )
-            result = res["result"]
-            code = result.get("code") if result else None
-            if code in ["0000", 0, "0"]:
-                _score = 0  # noqa: F841
-                if result.get("data"):
-                    import re
-
-                    raw_score = str(result.get("data", {}).get("score", "0"))
-                    match = re.search(r"(\d+)", raw_score)
-                    if match:
-                        _score = int(match.group(1))  # noqa: F841
-
-                # if _score > 0:
-                # self.logger.log(f"云盘任务: +{_score}积分")
-                return True
-            else:
-                self.logger.log(f"云盘领取奖励失败: {result}")
-                return False
-        except Exception as e:
-            self.logger.log(f"云盘领取奖励异常: {str(e)}")
-            return False
-
-    async def _cloud_activity_list(self, task_code, task_name):
-        """云盘: 浏览活动中心"""
-        if not await self._cloud_get_userticket(True):
-            return
-
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 12; Redmi K30 Pro Build/SKQ1.220303.001; wv) AppleWebKit/537.36 Mobile Safari/537.36/woapp LianTongYunPan/4.0.4 (Android 12)",
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Client-Id": "1001000035",
-                "App-Version": "yp-app/4.0.4",
-                "Access-Token": self.cloud_disk.get("userToken", ""),
-                "Sys-Version": "android/12",
-                "Origin": "https://panservice.mail.wo.cn",
-                "X-Requested-With": "com.chinaunicom.bol.cloudapp",
-                "Referer": "https://panservice.mail.wo.cn/h5/mobile/wocloud/activityCenter/home",
-            }
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["activityList"],
-                json={"bizKey": "activityCenterPipeline", "bizObject": {"pageNo": 1}},
-                headers=headers,
-            )
-            result = res["result"]
-            code = result.get("meta", {}).get("code") if result else None
-            if code in [0, "0"]:
-                await asyncio.sleep(2)
-                await self._cloud_do_popup(task_code, task_name, True)
-            else:
-                self.logger.log(f"云盘浏览活动中心失败: {result}")
-        except Exception as e:
-            self.logger.log(f"云盘浏览活动中心异常: {str(e)}")
-
-    async def _cloud_share_file(self, task_code, task_name):
-        """云盘: 分享文件"""
-        try:
-            timestamp = str(int(time.time() * 1000))
-            req_seq = random.randint(123456, 199999)
-            string_to_hash = f"ShareFile{timestamp}{req_seq}wohome"
-            md5_hash = hashlib.md5(string_to_hash.encode()).hexdigest()
-
-            # 加密分享数据
-            data = {
-                "fileIds": "f89417024f2642a399fd33f2beebd7c2",
-                "fileFolderIds": "",
-                "days": 7,
-                "clientId": "1001000003",
-            }
-            encrypted = self._cloud_encrypt_data(
-                data, self.cloud_disk.get("userToken", "")
-            )
-
-            payload = {
-                "header": {
-                    "key": "ShareFile",
-                    "resTime": timestamp,
-                    "reqSeq": req_seq,
-                    "channel": "wohome",
-                    "version": "",
-                    "sign": md5_hash,
-                },
-                "body": {
-                    "clientId": "1001000003",
-                    "param": json.dumps(encrypted),
-                    "secret": True,
-                },
-            }
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["ltypDispatcher"],
-                json=payload,
-                headers={
-                    "User-Agent": "Dalvik/2.1.0 (Linux; U; Android 12; leijun Pro Build/SKQ1.22013.001);unicom{version:android@11.0702}",
-                    "client-id": "1001000174",
-                    "x-yp-client-id": "1001000174",
-                },
-            )
-            result = res["result"]
-            if result and result.get("STATUS") in ["200", 200]:
-                await self._cloud_do_popup(task_code, task_name, False)
-            else:
-                self.logger.log(f"云盘分享文件失败: {result}")
-        except Exception as e:
-            self.logger.log(f"云盘分享文件异常: {str(e)}")
-
-    def _cloud_encrypt_data(self, data, key, iv="wNSOYIB1k1DjY5lA"):
-        """云盘: AES加密"""
-        try:
-            text = (
-                json.dumps(data, separators=(",", ":"))
-                if isinstance(data, (dict, list))
-                else str(data)
-            )
-            key_bytes = key[:16].encode("utf-8")
-            iv_bytes = iv.encode("utf-8")
-            cipher = AES.new(key_bytes, AES.MODE_CBC, iv_bytes)
-            encrypted = cipher.encrypt(pad(text.encode("utf-8"), AES.block_size))
-            return base64.b64encode(encrypted).decode("utf-8")
-        except Exception:
-            return data
-
-    async def _cloud_do_upload(self, task_code, task_name):
-        """云盘: 上传文件"""
-        if not await self._cloud_get_userticket(False):
-            return False
-
-        try:
-            payload = {
-                "batchNo": "D94628B6C8593D2C6A4B52D0A5F009F4",
-                "deviceId": "",
-                "directoryId": "0",
-                "familyId": 0,
-                "fileModificationTime": 1736861613000,
-                "fileName": "mmexport1736861613242.jpg",
-                "fileSize": "280800",
-                "fileType": "1",
-                "height": "1174",
-                "lat": "",
-                "lng": "",
-                "psToken": "",
-                "sha256": "9c75f5be16bbb4e17788180dfdf4b1d53ba590cb8f4c629e4b337f5f54565949",
-                "spaceType": "0",
-                "width": "986",
-            }
-
-            headers = {
-                "User-Agent": "okhttp-okgo/jeasonlzy LianTongYunPan/4.0.4 (Android 12)",
-                "client-Id": "1001000035",
-                "app-version": "yp-app/4.0.4",
-                "access-token": self.cloud_disk.get("userToken", ""),
-                "Content-Type": "application/json;charset=utf-8",
-            }
-
-            res = await self.http.request(
-                "POST", self.cloud_disk_urls["doUpload"], json=payload, headers=headers
-            )
-            result = res["result"]
-            if result and result.get("meta", {}).get("code") == "0000":
-                await asyncio.sleep(1)
-                return await self._cloud_do_popup(task_code, task_name, False)
-            else:
-                self.logger.log(f"云盘上传失败: {result}")
-                return False
-        except Exception as e:
-            self.logger.log(f"云盘上传异常: {str(e)}")
-            return False
-
-    async def _cloud_do_ai_interaction(self, task_code, task_name):
-        """云盘: AI通通互动"""
-        try:
-            headers = {
-                "accept": "text/event-stream",
-                "X-YP-Access-Token": self.cloud_disk.get("userToken", ""),
-                "X-YP-App-Version": "5.0.12",
-                "X-YP-Client-Id": "1001000035",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 9; SM-N9810) AppleWebKit/537.36 Mobile Safari/537.36/woapp LianTongYunPan/5.0.12 (Android 9)",
-                "Content-Type": "application/json",
-                "Origin": "https://panservice.mail.wo.cn",
-                "X-Requested-With": "com.chinaunicom.bol.cloudapp",
-            }
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["ai_query"],
-                json={
-                    "input": "Hi",
-                    "platform": 1,
-                    "modelId": 0,
-                    "tag": 0,
-                    "conversationId": "",
-                    "knowledgeId": "",
-                    "referFileInfo": [],
-                },
-                headers=headers,
-            )
-            result = res["result"]
-            body = (
-                result
-                if isinstance(result, str)
-                else json.dumps(result)
-                if result
-                else ""
-            )
-            if body and '"finish":1' in body:
-                return await self._cloud_do_popup(task_code, task_name, False)
-            return False
-        except Exception as e:
-            self.logger.log(f"云盘AI交互异常: {str(e)}")
-            return False
-
-    async def _cloud_open_album_backup(self, task_code, task_name):
-        """云盘: 打开相册自动备份"""
-        if not await self._cloud_get_userticket(True):
-            return
-
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 12; Redmi K30 Pro Build/SKQ1.220303.001; wv) AppleWebKit/537.36 Mobile Safari/537.36/woapp LianTongYunPan/4.0.4 (Android 12)",
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "Client-Id": "1001000035",
-                "App-Version": "yp-app/4.0.4",
-                "Access-Token": self.cloud_disk.get("userToken", ""),
-                "Sys-Version": "android/12",
-                "Origin": "https://panservice.mail.wo.cn",
-                "X-Requested-With": "com.chinaunicom.bol.cloudapp",
-            }
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["activityList"],
-                json={"bizKey": "activityCenterPipeline", "bizObject": {"pageNo": 1}},
-                headers=headers,
-            )
-            result = res["result"]
-            code = result.get("meta", {}).get("code") if result else None
-            if code in [0, "0"]:
-                await asyncio.sleep(2)
-        except Exception as e:
-            self.logger.log(f"云盘打开相册备份异常: {str(e)}")
-
-    async def _cloud_do_ai_query_for_lottery(self):
-        """云盘: DeepSeek对话获取抽奖资格"""
-        try:
-            headers = {
-                "accept": "text/event-stream",
-                "X-YP-Access-Token": self.cloud_disk.get("userToken", ""),
-                "X-YP-App-Version": "5.0.12",
-                "X-YP-Client-Id": "1001000035",
-                "User-Agent": "Mozilla/5.0 (Linux; Android 9; SM-N9810) AppleWebKit/537.36 Mobile Safari/537.36/woapp LianTongYunPan/5.0.12 (Android 9)",
-                "Content-Type": "application/json",
-                "Origin": "https://panservice.mail.wo.cn",
-                "X-Requested-With": "com.chinaunicom.bol.cloudapp",
-            }
-
-            res = await self.http.request(
-                "POST",
-                self.cloud_disk_urls["ai_query"],
-                json={
-                    "input": "Hi",
-                    "platform": 1,
-                    "modelId": 1,
-                    "tag": 0,
-                    "conversationId": "",
-                    "knowledgeId": "",
-                    "referFileInfo": [],
-                },
-                headers=headers,
-            )
-            result = res["result"]
-            body = (
-                result
-                if isinstance(result, str)
-                else json.dumps(result)
-                if result
-                else ""
-            )
-            if body and '"finish":1' in body:
-                return True
-            return False
-        except Exception as e:
-            self.logger.log(f"云盘DeepSeek对话异常: {str(e)}")
-            return False
-
-    async def _cloud_check_lottery_times(self):
-        """云盘: 查询抽奖次数"""
-        try:
-            headers = {
-                "X-YP-Access-Token": self.cloud_disk.get("userToken", ""),
-                "source-type": "woapi",
-                "clientId": "1001000165",
-                "token": self.cloud_disk.get("userToken", ""),
-                "X-YP-Client-Id": "1001000165",
-            }
-
-            res = await self.http.request(
-                "GET",
-                f"{self.cloud_disk_urls['lottery_times']}?activityId=MjI%3D",
-                headers=headers,
-            )
-            result = res["result"]
-            if result and result.get("meta", {}).get("code") == "200":
-                return int(result.get("result", 0))
-            return 0
-        except Exception as e:
-            self.logger.log(f"云盘查询抽奖次数异常: {str(e)}")
-            return 0
-
-    async def _cloud_lottery(self, activity_id_b64):
-        """云盘: 抽奖"""
-        try:
-            from urllib.parse import quote
-
-            activity_id_encoded = quote(activity_id_b64)
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Linux; Android 9; SM-N9810) AppleWebKit/537.36 Mobile Safari/537.36/woapp LianTongYunPan/5.0.12 (Android 9)",
-                "Accept": "application/json, text/plain, */*",
-                "Content-Type": "application/json",
-                "X-Requested-With": "com.chinaunicom.bol.cloudapp",
-                "requesttime": str(int(time.time() * 1000)),
-                "clientid": "1001000165",
-                "x-yp-client-id": "1001000165",
-                "source-type": "woapi",
-                "x-yp-access-token": self.cloud_disk.get("userToken", ""),
-                "token": self.cloud_disk.get("userToken", ""),
-                "origin": "https://panservice.mail.wo.cn",
-                "Referer": f"https://panservice.mail.wo.cn/h5/activitymobile/blindBox?activityId={activity_id_encoded}&touchpoint=300300010001&clientId=1001000035&token={self.cloud_disk.get('userToken', '')}",
-            }
-
-            payload = {
-                "bizKey": "newLottery",
-                "activityId": activity_id_b64,
-                "bizObject": {"lottery": {"activityId": activity_id_b64, "type": 3}},
-            }
-
-            res = await self.http.request(
-                "POST", self.cloud_disk_urls["lottery"], json=payload, headers=headers
-            )
-            result = res["result"]
-            if (
-                result
-                and result.get("meta", {}).get("code") == "200"
-                and result.get("result", {}).get("prizeName")
-            ):
-                self.logger.log(
-                    f"云盘抽奖: {result['result']['prizeName']}", notify=True
-                )
-                return True
-            else:
-                self.logger.log(f"云盘抽奖失败: {result}")
-                return False
-        except Exception as e:
-            self.logger.log(f"云盘抽奖异常: {str(e)}")
-            return False
 
     async def shangdu_task(self):
         if "河南" not in self.province:
@@ -3275,7 +2529,7 @@ class CustomUserService:
     # ====================  Woread (联通阅读)  ====================
 
     def _woread_encode(self, data, password=WOREAD_PASSWORD):
-        """联通阅读AES-CBC加密"""
+        """联通阅读AES-CBC加密(JS兼容: Hex再转Base64)"""
         try:
             text = (
                 json.dumps(data, separators=(",", ":"))
@@ -3286,7 +2540,9 @@ class CustomUserService:
             iv = WOREAD_IV.encode("utf-8")
             cipher = AES.new(key, AES.MODE_CBC, iv)
             encrypted = cipher.encrypt(pad(text.encode("utf-8"), AES.block_size))
-            return base64.b64encode(encrypted).decode("utf-8")
+            # JS: 先转Hex再转Base64
+            hex_str = encrypted.hex()
+            return base64.b64encode(hex_str.encode("utf-8")).decode("utf-8")
         except Exception as e:
             self.logger.log(f"联通阅读加密异常: {str(e)}")
             return ""
@@ -3294,31 +2550,33 @@ class CustomUserService:
     async def woread_auth(self):
         """联通阅读: 设备预登录获取accesstoken"""
         try:
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
-            sign_str = f"{WOREAD_PRODUCT_ID}{timestamp}{WOREAD_SECRET_KEY}"
+            # JS: let timestamp = Date.now();
+            timestamp = str(int(datetime.now().timestamp() * 1000))
+            sign_str = f"{WOREAD_PRODUCT_ID}{WOREAD_SECRET_KEY}{timestamp}"
             md5_hash = hashlib.md5(sign_str.encode("utf-8")).hexdigest()
 
-            data = {
-                "deviceId": self.random_string(32, "0123456789abcdef"),
-                "deviceType": "1",
-                "clientVersion": "6.0.0",
-            }
+            # JS: let dateStr = appName.time("yyyyMMddhhmmss");
+            date_str = datetime.now().strftime("%Y%m%d%H%M%S")
+            data = {"timestamp": date_str}
             encrypted_data = self._woread_encode(data)
 
             res = await self.http.request(
                 "POST",
                 f"https://10010.woread.com.cn/ng_woread_service/rest/app/auth/{WOREAD_PRODUCT_ID}/{timestamp}/{md5_hash}",
                 headers={
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": encrypted_data},
             )
 
             result = res["result"]
-            if result and str(result.get("code")) == "0":
-                self.woread_accesstoken = result.get("accesstoken", "")
+            if result and str(result.get("code")) == "0000":
+                self.woread_accesstoken = result.get("data", {}).get("accesstoken", "")
                 return True
+            else:
+                msg = result.get("message", "") if result else "请求失败"
+                self.logger.log(f"联通阅读预登录失败: {msg}")
             return False
         except Exception as e:
             self.logger.log(f"联通阅读预登录异常: {str(e)}")
@@ -3330,189 +2588,249 @@ class CustomUserService:
             if not await self.woread_auth():
                 return False
 
-            data = {
-                "phone": self.mobile,
-                "token": self.token_online,
-                "productId": WOREAD_PRODUCT_ID,
-                "time": datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3],
-            }
-            encrypted_data = self._woread_encode(data)
+            if not getattr(self, "token_online", None):
+                self.logger.log("联通阅读: 缺少 token_online")
+                return False
+
+            # JS: 分别加密 token_online 和 phone
+            token_enc = self._woread_encode_str(self.token_online)
+            phone_enc = self._woread_encode_str(self.mobile)
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+
+            # 构造内层JSON
+            inner_json = json.dumps(
+                {"tokenOnline": token_enc, "phone": phone_enc, "timestamp": timestamp},
+                separators=(",", ":"),
+            )
+
+            # 再次加密得到sign
+            sign = self._woread_encode_str(inner_json)
 
             res = await self.http.request(
                 "POST",
                 "https://10010.woread.com.cn/ng_woread_service/rest/account/login",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": sign},
             )
 
             result = res["result"]
-            if result and str(result.get("code")) == "0":
-                self.woread_usertoken = result.get("usertoken", "")
+            if result and str(result.get("code")) == "0000":
+                data = result.get("data", {})
+                self.woread_token = data.get("token", "")
+                self.woread_verifycode = data.get("verifycode", "")
+                self.woread_userid = data.get("userid", "")
+                self.woread_userindex = data.get("userindex", "")
+                self.logger.log("联通阅读: 登录成功")
                 return True
             else:
-                msg = result.get("msg", "") if result else "请求失败"
+                msg = (
+                    result.get("msg", "") or result.get("message", "")
+                    if result
+                    else "请求失败"
+                )
                 self.logger.log(f"联通阅读登录失败: {msg}")
                 return False
         except Exception as e:
             self.logger.log(f"联通阅读登录异常: {str(e)}")
             return False
 
+    def _woread_encode_str(self, text):
+        """联通阅读AES-CBC加密(字符串, JS兼容: Hex再转Base64)"""
+        try:
+            key = WOREAD_PASSWORD.encode("utf-8")
+            iv = WOREAD_IV.encode("utf-8")
+            cipher = AES.new(key, AES.MODE_CBC, iv)
+            encrypted = cipher.encrypt(pad(text.encode("utf-8"), AES.block_size))
+            # JS: 先转Hex再转Base64
+            hex_str = encrypted.hex()
+            return base64.b64encode(hex_str.encode("utf-8")).decode("utf-8")
+        except Exception as e:
+            self.logger.log(f"联通阅读加密异常: {str(e)}")
+            return ""
+
     async def woread_get_book_info(self):
         """联通阅读: 获取书籍信息"""
         try:
+            # 1. 获取推荐位信息得到 cntindex
             res = await self.http.request(
                 "GET",
                 "https://10010.woread.com.cn/ng_woread_service/rest/basics/recommposdetail/14856",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "usertoken": self.woread_usertoken,
                     "User-Agent": "okhttp/3.14.9",
                 },
             )
 
             result = res["result"]
-            if result and str(result.get("code")) == "0":
-                return result.get("recommPos", {})
-            return None
-        except Exception as e:
-            self.logger.log(f"联通阅读获取书籍异常: {str(e)}")
-            return None
+            if result and str(result.get("code")) == "0000":
+                data = result.get("data", {})
+                booklist = data.get("booklist", {}).get("message", [])
+                bindinfo = data.get("bindinfo", [])
+                if booklist and bindinfo:
+                    self.wr_catid = booklist[0].get("catindex", "")
+                    self.wr_cardid = bindinfo[0].get("recommposiindex", "")
+                    self.wr_cntindex = booklist[0].get("cntindex", "")
+                else:
+                    self.logger.log("联通阅读: 获取书籍列表为空")
+                    return False
+            else:
+                self.logger.log("联通阅读: 获取书籍列表失败")
+                return False
 
-    async def woread_read_process(self):
-        """联通阅读: 阅读任务（模拟阅读）"""
-        try:
-            book_info = await self.woread_get_book_info()
-            if not book_info:
-                self.logger.log("联通阅读: 获取书籍信息失败")
-                return
+            # 2. 获取章节信息得到 chapterallindex
+            if not self.wr_cntindex:
+                return False
 
-            book_id = book_info.get("bookId", "978752838809620240101")
-            chapter_id = book_info.get("chapterId", "978752838809620240101001")
-
-            # 获取章节列表
-            data = {
-                "bookId": book_id,
-                "chapterId": chapter_id,
-                "pageNo": 1,
-                "pageSize": 20,
+            param = {
+                "curPage": 1,
+                "limit": 30,
+                "index": self.wr_cntindex,
+                "sort": 0,
+                "finishFlag": 1,
+                **self._get_woread_param(),
             }
-            encrypted_data = self._woread_encode(data)
+            sign = self._woread_encode(param)
 
-            res = await self.http.request(
+            res2 = await self.http.request(
                 "POST",
                 "https://10010.woread.com.cn/ng_woread_service/rest/cnt/chalist",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "usertoken": self.woread_usertoken,
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": sign},
             )
 
-            result = res["result"]
-            if not result or str(result.get("code")) != "0":
-                self.logger.log("联通阅读: 获取章节列表失败")
-                return
-
-            chapters = result.get("list", [])
-            if not chapters:
-                return
-
-            # 模拟阅读3次
-            for i in range(3):
-                await asyncio.sleep(3)
-                chapter = chapters[i % len(chapters)]
-                await self._woread_heartbeat(
-                    book_id, chapter.get("chapterId", chapter_id)
-                )
-
-            # 添加阅读时长
-            await self._woread_add_read_time(book_id, chapter_id)
+            result2 = res2["result"]
+            chapters = result2.get("list", []) if result2 else []
+            if chapters and len(chapters) > 0:
+                chapter_content = chapters[0].get("charptercontent", [])
+                if chapter_content:
+                    self.wr_chapterallindex = chapter_content[0].get(
+                        "chapterallindex", ""
+                    )
+                    self.wr_chapterid = chapter_content[0].get("chapterid", "")
+                    return True
+            return False
 
         except Exception as e:
-            self.logger.log(f"联通阅读阅读任务异常: {str(e)}")
+            self.logger.log(f"联通阅读获取书籍异常: {str(e)}")
+            return False
 
-    async def _woread_heartbeat(self, book_id, chapter_id):
-        """联通阅读: 阅读心跳"""
+    def _get_woread_param(self):
+        """获取联通阅读公共参数"""
+        return {
+            "timestamp": datetime.now().strftime("%Y%m%d%H%M%S"),
+            "token": getattr(self, "woread_token", ""),
+            "userid": getattr(self, "woread_userid", ""),
+            "userId": getattr(self, "woread_userid", ""),
+            "userIndex": getattr(self, "woread_userindex", ""),
+            "userAccount": self.mobile,
+            "verifyCode": getattr(self, "woread_verifycode", ""),
+        }
+
+    async def woread_read_process(self):
+        """联通阅读: 阅读任务（模拟阅读）"""
         try:
-            words_detail = [
-                {"chapterId": chapter_id, "words": random.randint(500, 1500)}
-            ]
-            data = {
-                "bookId": book_id,
-                "chapterId": chapter_id,
-                "wordsDetail": words_detail,
-                "readTime": random.randint(60, 180),
+            if not await self.woread_get_book_info():
+                self.logger.log("联通阅读: 无法获取书籍信息，跳过阅读")
+                return
+
+            # 发送阅读心跳 wordsDetail
+            param = {
+                "chapterAllIndex": self.wr_chapterallindex,
+                "cntIndex": self.wr_cntindex,
+                "cntTypeFlag": "1",
+                **self._get_woread_param(),
             }
-            encrypted_data = self._woread_encode(data)
+            sign = self._woread_encode(param)
 
             await self.http.request(
                 "POST",
-                "https://10010.woread.com.cn/ng_woread_service/rest/history/heartbeat",
+                f"https://10010.woread.com.cn/ng_woread_service/rest/cnt/wordsDetail?catid={self.wr_catid}&cardid={self.wr_cardid}&cntindex={self.wr_cntindex}&chapterallindex={self.wr_chapterallindex}&chapterseno=1",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "usertoken": self.woread_usertoken,
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": sign},
             )
-        except Exception:
-            pass
 
-    async def _woread_add_read_time(self, book_id, chapter_id):
-        """联通阅读: 添加阅读时长"""
-        try:
-            data = {
-                "bookId": book_id,
-                "chapterId": chapter_id,
-                "readTime": random.randint(300, 600),
+            await asyncio.sleep(2)
+
+            # 增加阅读时长 addReadTime
+            add_param = {
+                "readTime": "2",
+                "cntIndex": self.wr_cntindex,
+                "cntType": "1",
+                "catid": "0",
+                "pageIndex": "",
+                "cardid": self.wr_cardid,
+                "cntindex": self.wr_cntindex,
+                "cnttype": "1",
+                "chapterallindex": self.wr_chapterallindex,
+                "chapterseno": "1",
+                "channelid": "",
+                "chapterid": self.wr_chapterid,
+                "readtype": 1,
+                "isend": "0",
+                **self._get_woread_param(),
             }
-            encrypted_data = self._woread_encode(data)
+            add_sign = self._woread_encode(add_param)
 
-            await self.http.request(
+            res = await self.http.request(
                 "POST",
                 "https://10010.woread.com.cn/ng_woread_service/rest/history/addReadTime",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "usertoken": self.woread_usertoken,
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": add_sign},
             )
-        except Exception:
-            pass
+
+            result = res["result"]
+            if result and str(result.get("code")) == "0000":
+                self.logger.log("联通阅读: 模拟阅读成功")
+            else:
+                msg = result.get("msg", "") if result else ""
+                self.logger.log(f"联通阅读: 模拟阅读失败: {msg}")
+
+        except Exception as e:
+            self.logger.log(f"联通阅读阅读任务异常: {str(e)}")
 
     async def woread_draw_new(self):
         """联通阅读: 抽奖"""
         try:
-            data = {"activeindex": "8051"}
-            encrypted_data = self._woread_encode(data)
+            param = {"activeindex": "8051", **self._get_woread_param()}
+            sign = self._woread_encode(param)
 
             res = await self.http.request(
                 "POST",
                 "https://10010.woread.com.cn/ng_woread_service/rest/basics/doDraw",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "usertoken": self.woread_usertoken,
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": sign},
             )
 
             result = res["result"]
-            if result and str(result.get("code")) == "0":
-                prize = result.get("giftname", "未知奖品")
+            if result and str(result.get("code")) == "0000":
+                prize = result.get("data", {}).get("prizedesc", "未知奖品")
                 self.logger.log(f"联通阅读抽奖: {prize}", notify=True)
             else:
-                msg = result.get("msg", "") if result else "请求失败"
+                msg = (
+                    result.get("msg", "") or result.get("message", "")
+                    if result
+                    else "请求失败"
+                )
                 if "已抽" in msg or "次数" in msg:
                     self.logger.log(f"联通阅读: {msg}")
                 else:
@@ -3523,40 +2841,42 @@ class CustomUserService:
     async def woread_queryTicketAccount(self):
         """联通阅读: 查询话费红包余额"""
         try:
-            data = {"type": "1"}
-            encrypted_data = self._woread_encode(data)
+            param = self._get_woread_param()
+            sign = self._woread_encode(param)
 
             res = await self.http.request(
                 "POST",
                 "https://10010.woread.com.cn/ng_woread_service/rest/phone/vouchers/queryTicketAccount",
                 headers={
                     "accesstoken": self.woread_accesstoken,
-                    "usertoken": self.woread_usertoken,
-                    "Content-Type": "text/plain;charset=UTF-8",
+                    "Content-Type": "application/json",
                     "User-Agent": "okhttp/3.14.9",
                 },
-                data=encrypted_data,
+                json={"sign": sign},
             )
 
             result = res["result"]
-            if result and str(result.get("code")) == "0":
-                balance = result.get("balance", 0)
+            if result and str(result.get("code")) == "0000":
+                usable_num = result.get("data", {}).get("usableNum", 0)
                 self.logger.log(
-                    f"联通阅读话费红包余额: {float(balance) / 100:.2f}元", notify=True
+                    f"联通阅读话费红包余额: {float(usable_num) / 100:.2f}元", notify=True
                 )
         except Exception as e:
             self.logger.log(f"联通阅读查询余额异常: {str(e)}")
 
     async def woread_task(self):
         """联通阅读任务入口"""
+        self.logger.log("============= 联通阅读 =============")
         if not await self.woread_login():
+            self.logger.log("联通阅读: 登录失败，跳过任务")
             return
 
         await self.woread_read_process()
-        await asyncio.sleep(3)
+        # await asyncio.sleep(3)
         await self.woread_draw_new()
-        await asyncio.sleep(3)
+        # await asyncio.sleep(3)
         await self.woread_queryTicketAccount()
+        # self.logger.log("============= 联通阅读执行完毕 =============")
 
     async def user_task(self):
         # self.logger.log(f"\n------------------ 账号 {self.mobile} ------------------")
@@ -3567,10 +2887,9 @@ class CustomUserService:
         await self.ttlxj_task()
         await self.ltzf_task()
         await self.market_task()
-        await self.xj_task()
+        # await self.xj_task()
         await self.wostore_cloud_task()
         await self.security_butler_task()
-        await self.cloud_disk_task()
         await self.shangdu_task()
         await self.woread_task()
 
