@@ -16,7 +16,7 @@ import random
 import string
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from Crypto.Cipher import AES, PKCS1_v1_5
@@ -1300,7 +1300,7 @@ class CustomUserService:
         try:
             res = await self.http.request(
                 "POST",
-                "https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkWatering",
+                "https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkWatering?xbsosjl=xbsosjltrue",
                 headers={"Authorization": f"Bearer {self.market_token}"},
                 json={},
             )
@@ -1791,7 +1791,6 @@ class CustomUserService:
     async def sign_do_task_from_list(self, task):
         """执行签到区任务"""
         try:
-            _task_name = task.get("taskName", "")  # noqa: F841
             task_url = task.get("url", "")
 
             # 如果有有效的URL，先访问
@@ -1817,8 +1816,8 @@ class CustomUserService:
                 },
             )
 
-            _result = res["result"]  # noqa: F841
-            code = str(_result.get("code", "")) if _result else ""
+            result = res["result"]
+            code = str(result.get("code", "")) if result else ""
 
             if code == "0000":
                 # self.logger.log(f"签到区-任务: [{_task_name}] 完成")
@@ -1858,9 +1857,8 @@ class CustomUserService:
             if code == "0000":
                 data = result.get("data", {})
                 if str(data.get("code", "")) == "0000":
-                    _prize_name = data.get("prizeName", "")  # noqa: F841
-                    _prize_name_red = data.get("prizeNameRed", "")  # noqa: F841
                     # self.logger.log(f"签到区-领取奖励: [{_prize_name}] {_prize_name_red}", notify=True)
+                    pass
 
         except Exception:
             pass
@@ -1964,8 +1962,6 @@ class CustomUserService:
                 return
 
             # Step 2: 查询页面获取jeaId
-            from urllib.parse import unquote
-
             res2 = await self.http.request(
                 "POST",
                 "https://m.jf.10010.com/jf-external-application/page/query",
@@ -2158,8 +2154,6 @@ class CustomUserService:
     async def _sec_sign_in(self, task_code):
         """安全管家: 签到"""
         try:
-            from urllib.parse import unquote
-
             await self.http.request(
                 "POST",
                 "https://m.jf.10010.com/jf-external-application/jftask/sign",
@@ -2179,9 +2173,7 @@ class CustomUserService:
     async def _sec_receive_points(self, task_code):
         """安全管家: 领取积分"""
         try:
-            from urllib.parse import unquote
-
-            res = await self.http.request(
+            await self.http.request(
                 "POST",
                 "https://m.jf.10010.com/jf-external-application/jftask/receive",
                 headers={
@@ -2194,9 +2186,6 @@ class CustomUserService:
                 },
                 json={"taskCode": task_code},
             )
-            _result = res["result"]  # noqa: F841
-            # if _result and _result.get('data') and _result['data'].get('score'):
-            # self.logger.log(f"安全管家: {_result['data']['score']}")
 
         except Exception as e:
             self.logger.log(f"安全管家领取积分异常: {str(e)}")
@@ -2204,8 +2193,6 @@ class CustomUserService:
     async def _sec_finish_task(self, task_code, task_name):
         """安全管家: 完成任务"""
         try:
-            from urllib.parse import unquote
-
             await self.http.request(
                 "POST",
                 "https://m.jf.10010.com/jf-external-application/jftask/toFinish",
@@ -2237,8 +2224,6 @@ class CustomUserService:
     async def _sec_execute_all_tasks(self):
         """安全管家: 执行所有任务"""
         try:
-            from urllib.parse import unquote
-
             res = await self.http.request(
                 "POST",
                 "https://m.jf.10010.com/jf-external-application/jftask/taskDetail",
@@ -2306,8 +2291,6 @@ class CustomUserService:
     async def _sec_get_user_info(self):
         """安全管家: 获取用户积分信息"""
         try:
-            from urllib.parse import unquote
-
             res = await self.http.request(
                 "POST",
                 "https://m.jf.10010.com/jf-external-application/jftask/userInfo",
