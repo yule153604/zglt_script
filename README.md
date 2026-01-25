@@ -153,6 +153,19 @@ pip install httpx pycryptodome
 
 #### 获取 token_online
 
+**方式一：使用登录脚本（推荐）**
+
+1. 编辑 `login.py`，填入手机号和短信验证码
+2. 运行 `python login.py`
+3. 控制台输出的字符串即为 `token_online`
+
+```python
+Mobile = "18812345678"  # 填入手机号
+SMS_code = "123456"     # 填入短信验证码
+```
+
+**方式二：抓包获取**
+
 1. 使用抓包工具（如Stream、Fiddler）抓取中国联通APP的请求
 2. 找到 `https://m.client.10010.com/mobileService/onLine.htm` 请求
 3. 提取请求体中的 `token_online` 值
