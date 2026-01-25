@@ -19,119 +19,27 @@ from datetime import datetime
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
-from Crypto.Cipher import AES, PKCS1_v1_5
-from Crypto.PublicKey import RSA
+from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
-
-
-class _QLAPIStub:
-    """青龙API存根，实际运行时由青龙环境注入"""
-
-    @staticmethod
-    def getEnvs(*args, **kwargs):
-        return {}
-
-    @staticmethod
-    def updateEnv(*args, **kwargs):
-        return None
-
-
-QLAPI = _QLAPIStub()  # 青龙环境会覆盖此变量
 
 # ====================  Constants  ====================
 APP_VERSION = "iphone_c@11.0503"
-SHOW_PRIZE_POOL = True  # 是否显示权益超市奖品池信息，默认关闭
+SHOW_PRIZE_POOL = True  # 是否显示权益超市奖品池信息
 USER_AGENT = f"Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{{version:{APP_VERSION}}}"
 APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922869a8d2313b6f2f9f3b57f2901f0021c4575e4b6949ae18b7f6761d465c12321788dcd980aa1a641789d1188bb"
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
-CLIENT_ID_2 = "1001000003"
-ANOTHER_API_KEY = "beea1c7edf7c4989b2d3621c4255132f"
 
 # ====================  Woread Constants  ====================
 WOREAD_PRODUCT_ID = "10000002"
 WOREAD_SECRET_KEY = "7k1HcDL8RKvc"
 WOREAD_PASSWORD = "woreadst^&*12345"
 WOREAD_IV = "16-Bytes--String"
-ANOTHER_ENCRYPTION_KEY = "f4cd4ffeb5554586acf65ba7110534f5"
-SERVICE_LIFE = "wocareMBHServiceLife1"
-MIN_RETRIES = "1"
 
-
-# ====================  青龙API操作  ====================
-def ql_get_env(name):
-    """获取青龙环境变量"""
-    try:
-        res = QLAPI.getEnvs({"searchValue": name})
-        for env in res.get("data", []):
-            if env.get("name") == name:
-                return env
-        return None
-    except Exception:
-        return None
-
-
-def ql_update_env(env_data):
-    """更新青龙环境变量"""
-    try:
-        QLAPI.updateEnv({"env": env_data})
-        return True
-    except Exception:
-        return False
-
-
-def ql_update_cookie_to_token(phone, token_online, appid):
-    """
-    将 chinaUnicomCookie 中对应手机号的账密格式更新为 token_online#appid 格式
-    账密格式: 手机号#密码
-    Token格式: token_online#appid
-    """
-    try:
-        env = ql_get_env("chinaUnicomCookie")
-        if not env:
-            print("[QL] 未找到 chinaUnicomCookie 环境变量")
-            return False
-
-        old_value = env.get("value", "")
-        if not old_value:
-            return False
-
-        # 分割多账号（@分隔）
-        accounts = old_value.split("@")
-        updated = False
-        new_accounts = []
-
-        for account in accounts:
-            account = account.strip()
-            if not account:
-                continue
-
-            # 检查是否是当前手机号的账密格式
-            if account.startswith(phone + "#"):
-                parts = account.split("#")
-                # 账密格式：手机号#密码（密码长度通常<50）
-                if len(parts) >= 2 and len(parts[1]) < 50:
-                    # 替换为 token_online#appid 格式
-                    new_accounts.append(f"{token_online}#{appid}")
-                    updated = True
-                    print(f"[QL] 账号 {phone} 已从账密格式更新为Token格式")
-                else:
-                    new_accounts.append(account)
-            else:
-                new_accounts.append(account)
-
-        if updated:
-            env["value"] = "@".join(new_accounts)
-            if ql_update_env(env):
-                print("[QL] chinaUnicomCookie 环境变量更新成功")
-                return True
-            else:
-                print("[QL] chinaUnicomCookie 环境变量更新失败")
-                return False
-
-        return False
-    except Exception as e:
-        print(f"[QL] 更新环境变量异常: {str(e)}")
-        return False
+# ====================  Wocare Constants  ====================
+WOCARE_CHANNEL_ID = "beea1c7edf7c4989b2d3621c4255132f"
+WOCARE_SIGN_KEY = "f4cd4ffeb5554586acf65ba7110534f5"
+WOCARE_CHANNEL_TYPE = "wocareMBHServiceLife1"
+WOCARE_VERSION = "1"
 
 
 # ====================  Global Market Raffle State  ====================
@@ -145,23 +53,37 @@ class MarketRaffleState:
 
     async def check_prizes(self, http_client, market_token):
         """检查奖池状态，只执行一次"""
+
+        def get_display_width(s):
+            """计算字符串显示宽度（中文占2，英文占1）"""
+            width = 0
+            for c in s:
+                width += 2 if ord(c) > 127 else 1
+            return width
+
+        def pad_to_width(s, target_width):
+            """填充字符串到指定显示宽度"""
+            current_width = get_display_width(s)
+            padding = target_width - current_width
+            return s + " " * max(0, padding)
+
         async with self.lock:
             if self.checked:
                 return self.has_prizes
 
-            print("\n" + "=" * 60)
+            print("\n" + "=" * 70)
             print("权益超市奖品池查询")
-            print("=" * 60)
+            print("=" * 70)
 
             try:
                 res = await http_client.request(
                     "POST",
                     "https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/prizeList?id=12",
                     headers={"Authorization": f"Bearer {market_token}"},
-                    data="",
+                    json={},
                 )
 
-                result = MarketEncrypt.decrypt(res["result"])
+                result = res["result"]
                 if (
                     result
                     and result.get("code") == 200
@@ -169,49 +91,49 @@ class MarketRaffleState:
                 ):
                     self.prizes = result["data"]
 
-                    # 筛选今日奖池（概率>0的奖品）
-                    today_prizes = [
-                        p for p in self.prizes if float(p.get("probability", 0)) > 0
-                    ]
-                    total = len(today_prizes)
+                    # 筛选任意中奖率>0的奖品
+                    available_prizes = []
+                    for p in self.prizes:
+                        try:
+                            prob = float(p.get("probability", 0))
+                            prob_vip = float(p.get("probabilityVip", 0))
+                            prob_new = float(p.get("newVipProbability", 0))
+                        except (ValueError, TypeError):
+                            prob = prob_vip = prob_new = 0.0
+                        if prob > 0 or prob_vip > 0 or prob_new > 0:
+                            available_prizes.append(p)
+
+                    total = len(available_prizes)
                     print(f"今日奖池共 {total} 个奖品:\n")
 
-                    # 有效奖品关键词
-                    include_keywords = ["月卡", "周卡", "月度", "季卡"]
-                    exclude_keywords = ["5G宽视界", "沃视频"]
+                    # 表头
+                    print(
+                        f"{pad_to_width('奖品名称', 36)} {'普通':>6} {'VIP':>6} {'新会员':>6} {'Limit':>6}"
+                    )
+                    print("-" * 70)
 
-                    valid_count = 0
-                    for i, prize in enumerate(today_prizes, 1):
+                    for prize in available_prizes:
                         name = prize.get("name", "未知")
+                        # 按显示宽度截断
+                        if get_display_width(name) > 34:
+                            while get_display_width(name) > 32:
+                                name = name[:-1]
+                            name = name + ".."
                         try:
-                            daily_limit = int(prize.get("dailyPrizeLimit", 0))
-                            quantity = int(prize.get("quantity", 0))
                             prob = float(prize.get("probability", 0))
+                            prob_vip = float(prize.get("probabilityVip", 0))
+                            prob_new = float(prize.get("newVipProbability", 0))
+                            daily_limit = int(prize.get("dailyPrizeLimit", 0))
                         except (ValueError, TypeError):
+                            prob = prob_vip = prob_new = 0.0
                             daily_limit = 0
-                            quantity = 0
-                            prob = 0.0
 
-                        # 判断奖品是否有效：包含指定关键词、不含排除关键词、概率>0
-                        has_include = any(kw in name for kw in include_keywords)
-                        has_exclude = any(kw in name for kw in exclude_keywords)
-                        is_valid = has_include and not has_exclude and prob > 0
-
-                        status = "✅" if is_valid else "❌"
-                        if is_valid:
-                            valid_count += 1
-
-                        print(f"  {status} [{i:02d}] {name}")
                         print(
-                            f"       今日投放: {daily_limit} | 总库存: {quantity} | 概率: {prob * 100:.2f}%"
+                            f"{pad_to_width(name, 36)} {prob * 100:>5.0f}% {prob_vip * 100:>5.0f}% {prob_new * 100:>5.0f}% {daily_limit:>6}"
                         )
 
-                    print(f"\n{'=' * 60}")
-                    if valid_count > 0:
-                        self.has_prizes = True
-                    else:
-                        self.has_prizes = False
-                    print("=" * 60 + "\n")
+                    print("=" * 70 + "\n")
+                    self.has_prizes = total > 0
                 else:
                     print(f"奖品池查询失败: {result}")
                     self.has_prizes = False
@@ -336,41 +258,6 @@ class MarketEncrypt:
             return data
 
 
-# ====================  RSA Encrypt (账密登录)  ====================
-class RSAEncrypt:
-    """RSA加密类，用于账号密码登录"""
-
-    def __init__(self):
-        self.public_key = """-----BEGIN PUBLIC KEY-----
-MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDc+CZK9bBA9IU+gZUOc6FUGu7y
-O9WpTNB0PzmgFBh96Mg1WrovD1oqZ+eIF4LjvxKXGOdI79JRdve9NPhQo07+uqGQ
-gE4imwNnRx7PFtCRryiIEcUoavuNtuRVoBAm6qdB0SrctgaqGfLgKvZHOnwTjyNq
-jBUxzMeQlEC2czEMSwIDAQAB
------END PUBLIC KEY-----"""
-        self.max_block_size = 117
-
-    def encrypt(self, plaintext, is_password=False):
-        """RSA加密"""
-        try:
-            if is_password:
-                plaintext = plaintext + "000000"
-
-            raw = plaintext.encode("utf-8")
-            pubkey = RSA.import_key(self.public_key)
-            cipher = PKCS1_v1_5.new(pubkey)
-
-            result = []
-            for i in range(0, len(raw), self.max_block_size):
-                block = raw[i : i + self.max_block_size]
-                encrypted_block = cipher.encrypt(block)
-                result.append(encrypted_block)
-
-            encrypted = b"".join(result)
-            return base64.b64encode(encrypted).decode("utf-8")
-        except Exception:
-            return ""
-
-
 class CustomUserService:
     def __init__(self, cookie, index=1):
         self.cookie = cookie
@@ -381,26 +268,9 @@ class CustomUserService:
         self.mobile = ""
         self.app_version = APP_VERSION
 
-        # 解析登录方式：账密登录格式为"手机号#密码"（密码较短），token登录格式为长token字符串
-        self.login_mode = self._detect_login_mode(cookie)
-        if self.login_mode == "password":
-            parts = cookie.split("#")
-            self.phone = parts[0]
-            self.password = parts[1] if len(parts) > 1 else ""
-            self.token_online = ""
-            # 生成 appid（用于账密登录）
-            self.app_id = self._generate_appid()
-        else:
-            # Token登录格式：token_online 或 token_online#appid
-            parts = cookie.split("#")
-            self.token_online = parts[0]
-            self.phone = ""
-            self.password = ""
-            # 如果有第二部分且长度足够长（appid特征），则使用它
-            if len(parts) >= 2 and len(parts[1]) > 50:
-                self.app_id = parts[1]
-            else:
-                self.app_id = APP_ID
+        # Token登录：直接使用 token_online
+        self.token_online = cookie.strip()
+        self.app_id = APP_ID
 
         self.unicom_token_id = self.random_string(32)
         self.token_id_cookie = "chinaunicom-" + self.random_string(
@@ -423,30 +293,6 @@ class CustomUserService:
         self.wocare_sid = ""
         self.ecs_token = ""
         self.initial_telephone_amount = 0.0
-
-    def _detect_login_mode(self, cookie):
-        """检测登录模式：账密登录或token登录"""
-        if "#" in cookie:
-            parts = cookie.split("#")
-            # 账密登录格式：手机号#密码（手机号11位数字，密码通常较短）
-            if len(parts) >= 2:
-                phone = parts[0]
-                password = parts[1]
-                # 手机号应为11位数字，密码长度通常小于50
-                if phone.isdigit() and len(phone) == 11 and len(password) < 50:
-                    return "password"
-        # 默认为token登录
-        return "token"
-
-    def _generate_appid(self):
-        """生成账密登录用的appid"""
-        return (
-            f"{random.randint(0, 9)}f{random.randint(0, 9)}af"
-            f"{random.randint(0, 9)}{random.randint(0, 9)}ad"
-            f"{random.randint(0, 9)}912d306b5053abf90c7ebbb695887bc"
-            "870ae0706d573c348539c26c5c0a878641fcc0d3e90acb9be1e6ef858a"
-            "59af546f3c826988332376b7d18c8ea2398ee3a9c3db947e2471d32a49612"
-        )
 
     def random_string(self, length, chars=string.ascii_letters + string.digits):
         return "".join(random.choice(chars) for _ in range(length))
@@ -477,120 +323,8 @@ class CustomUserService:
 
     # ====================  Login  ====================
     async def online(self):
-        """登录方法：根据登录模式自动选择token登录或账密登录"""
-        if self.login_mode == "password":
-            return await self._login_with_password()
-        else:
-            return await self._login_with_token()
-
-    async def _login_with_password(self):
-        """账号密码登录"""
+        """Token登录"""
         try:
-            self.logger.log(f"使用账密登录: {self.phone}")
-            rsa = RSAEncrypt()
-            encrypted_mobile = rsa.encrypt(self.phone, is_password=False)
-            encrypted_password = rsa.encrypt(self.password, is_password=True)
-
-            if not encrypted_mobile or not encrypted_password:
-                self.logger.log("RSA加密失败")
-                return False
-
-            device_id = hashlib.md5(self.phone.encode()).hexdigest()
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-            data = {
-                "voipToken": "citc-default-token-do-not-push",
-                "deviceBrand": "iPhone",
-                "simOperator": "--,%E4%B8%AD%E5%9B%BD%E7%A7%BB%E5%8A%A8,--,--,--",
-                "deviceId": device_id,
-                "netWay": "wifi",
-                "deviceCode": device_id,
-                "deviceOS": "15.8.3",
-                "uniqueIdentifier": device_id,
-                "latitude": "",
-                "version": "iphone_c@12.0200",
-                "pip": "192.168.5.14",
-                "isFirstInstall": "1",
-                "remark4": "",
-                "keyVersion": "2",
-                "longitude": "",
-                "simCount": "1",
-                "mobile": encrypted_mobile,
-                "isRemberPwd": "false",
-                "appId": self.app_id,
-                "reqtime": timestamp,
-                "deviceModel": "iPhone8,2",
-                "password": encrypted_password,
-            }
-
-            headers = {
-                "Host": "m.client.10010.com",
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "ChinaUnicom4.x/12.2 (com.chinaunicom.mobilebusiness; build:44; iOS 15.8.3) Alamofire/4.7.3 unicom{{version:iphone_c@12.0200}}",
-            }
-
-            res = await self.http.request(
-                "POST",
-                "https://m.client.10010.com/mobileService/login.htm",
-                data=data,
-                headers=headers,
-            )
-
-            result = res["result"]
-            code = str(result.get("code", "")) if result else ""
-
-            if code in ["0", "0000"]:
-                self.token_online = result.get("token_online", "")
-                self.ecs_token = result.get("ecs_token", "")
-                self.mobile = self.phone
-                self.valid = True
-                self.province = ""
-
-                # 尝试获取省份信息
-                user_list = result.get("list", [])
-                if user_list and len(user_list) > 0:
-                    self.province = user_list[0].get("proName", "")
-
-                masked_mobile = self.mobile[:3] + "****" + self.mobile[-4:]
-                self.logger.log(
-                    f"账密登录成功: {masked_mobile} (归属地: {self.province})"
-                )
-
-                # 账密登录成功后，尝试更新青龙环境变量为token格式
-                try:
-                    ql_update_cookie_to_token(
-                        self.phone, self.token_online, self.app_id
-                    )
-                except Exception:
-                    pass  # 非青龙环境下忽略
-
-                return True
-            elif code == "2":
-                self.logger.log("密码错误，请检查登录专用密码")
-                return False
-            elif code == "11":
-                self.logger.log("未设置登录专用密码，请前往联通APP设置")
-                return False
-            elif code == "ECS99999":
-                self.logger.log("触发安全风控，请手动登录联通APP解除")
-                return False
-            else:
-                desc = result.get("desc", "未知错误") if result else "请求失败"
-                self.logger.log(f"账密登录失败: {desc} (Code: {code})")
-                return False
-
-        except Exception as e:
-            self.logger.log(f"账密登录异常: {str(e)}")
-            return False
-
-    async def _login_with_token(self):
-        """Token登录（原online方法）"""
-        try:
-            # Fake device info
-            # device_id = (
-            # "968e026d0b00180ad57dce019a59ed44ce3ef0ddd78bc3a221de273c666ec130"
-            # )
-            # device_code = "F2D25EE0-DEAD-483F-ADF6-E6434DF72F5F"
             unique_identifier = "ios" + self.random_string(32, "0123456789abcdef")
 
             data = {
@@ -603,8 +337,6 @@ class CustomUserService:
                 "deviceModel": "iPhone14,6",
                 "deviceOS": "16.6",
                 "deviceBrand": "iPhone",
-                #'deviceId': device_id,
-                #'deviceCode': device_code,
                 "uniqueIdentifier": unique_identifier,
                 "simOperator": "--,--,65535,65535,--@--,--,65535,65535,--",
                 "voipToken": "citc-default-token-do-not-push",
@@ -927,7 +659,7 @@ class CustomUserService:
     async def ltzf_task(self):
         target_url = (
             "https://wocare.unisk.cn/mbh/getToken?channelType="
-            + SERVICE_LIFE
+            + WOCARE_CHANNEL_TYPE
             + "&homePage=home&duanlianjieabc=qAz2m"
         )
         ticket_info = await self.open_plat_line_new(target_url)
@@ -950,7 +682,7 @@ class CustomUserService:
     async def wocare_get_token(self, ticket):
         try:
             params = {
-                "channelType": SERVICE_LIFE,
+                "channelType": WOCARE_CHANNEL_TYPE,
                 "type": "02",
                 "ticket": ticket,
                 "version": APP_VERSION,
@@ -987,7 +719,7 @@ class CustomUserService:
         try:
             data = {
                 "sid": self.wocare_sid,
-                "channelType": SERVICE_LIFE,
+                "channelType": WOCARE_CHANNEL_TYPE,
                 "apiCode": "loginmbh",
             }
             res = await self.wocare_api("loginmbh", data)
@@ -1015,9 +747,9 @@ class CustomUserService:
         ).decode("utf-8")
 
         body = {
-            "version": MIN_RETRIES,
+            "version": WOCARE_VERSION,
             "apiCode": api_code,
-            "channelId": ANOTHER_API_KEY,
+            "channelId": WOCARE_CHANNEL_ID,
             "transactionId": timestamp + self.random_string(6, string.digits),
             "timeStamp": timestamp,
             "messageContent": msg_content,
@@ -1025,7 +757,7 @@ class CustomUserService:
 
         sorted_keys = sorted(body.keys())
         sign_str = "&".join([f"{k}={body[k]}" for k in sorted_keys])
-        sign_str += f"&sign={ANOTHER_ENCRYPTION_KEY}"
+        sign_str += f"&sign={WOCARE_SIGN_KEY}"
         body["sign"] = hashlib.md5(sign_str.encode("utf-8")).hexdigest()
 
         return body
@@ -1072,7 +804,7 @@ class CustomUserService:
         try:
             data = {
                 "token": self.wocare_token,
-                "channelType": SERVICE_LIFE,
+                "channelType": WOCARE_CHANNEL_TYPE,
                 "type": task_info["id"],
                 "apiCode": "getDrawTask",
             }
@@ -1094,7 +826,7 @@ class CustomUserService:
             action = "领取任务" if step == "1" else "完成任务"
             data = {
                 "token": self.wocare_token,
-                "channelType": SERVICE_LIFE,
+                "channelType": WOCARE_CHANNEL_TYPE,
                 "task": task["id"],
                 "taskStep": step,
                 "type": task_info["id"],
@@ -1116,7 +848,7 @@ class CustomUserService:
         try:
             data = {
                 "token": self.wocare_token,
-                "channelType": SERVICE_LIFE,
+                "channelType": WOCARE_CHANNEL_TYPE,
                 "type": task_info["id"],
                 "apiCode": "loadInit",
             }
@@ -1137,7 +869,7 @@ class CustomUserService:
                     count = int(data.get("mhRaffleCountValue", 0))
 
                 for _ in range(count):
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(2)
                     await self.wocare_luck_draw(task_info, group_id)
             else:
                 self.logger.log(f"联通祝福[{task_info['name']}]查询活动失败: {result}")
@@ -1148,7 +880,7 @@ class CustomUserService:
         try:
             data = {
                 "token": self.wocare_token,
-                "channelType": SERVICE_LIFE,
+                "channelType": WOCARE_CHANNEL_TYPE,
                 "zActiveModuleGroupId": group_id,
                 "type": task_info["id"],
                 "apiCode": "luckDraw",
@@ -1182,19 +914,13 @@ class CustomUserService:
             return False
 
         try:
-            y_gdtco4r = self.random_string(
-                500, string.ascii_letters + string.digits + "._-"
-            )
             res = await self.http.request(
                 "POST",
-                f"https://backward.bol.wo.cn/prod-api/auth/marketUnicomLogin?yGdtco4r={y_gdtco4r}",
+                f"https://backward.bol.wo.cn/prod-api/auth/marketUnicomLogin?ticket={ticket_info['ticket']}&channel=unicomTab",
                 headers={
-                    "Host": "backward.bol.wo.cn",
-                    "Origin": "https://contact.bol.wo.cn",
-                    "Referer": "https://contact.bol.wo.cn/",
-                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Content-Type": "application/json",
                 },
-                data={"ticket": ticket_info["ticket"]},
+                json={},
             )
 
             result = res["result"]
@@ -1298,9 +1024,10 @@ class CustomUserService:
 
     async def market_watering(self):
         try:
+            timestamp = int(time.time() * 1000)
             res = await self.http.request(
                 "POST",
-                "https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkWatering?xbsosjl=xbsosjltrue",
+                f"https://backward.bol.wo.cn/prod-api/promotion/activityTaskShare/checkWatering?xbsosjl=xbsosjlsujif&timeVerRan={timestamp}",
                 headers={"Authorization": f"Bearer {self.market_token}"},
                 json={},
             )
@@ -1337,15 +1064,11 @@ class CustomUserService:
     async def market_raffle_task(self):
         """权益超市抽奖任务"""
         try:
-            y_gdtco4r = "0QDEN3AEqWlrU036_dbyBvP8.68dggpJ9Em3UEzaRWLwzFshel7nj1kEQxCiI.B_fIDMRTiEwAgmaG93mDGPLvSObw_.EMz5QG4wZp7CfpHt4y4WwUioW5NoIaRtTpiyNJN6ncFGlF607_haxxASNFfzwkxRl9XZq9UfHhGY.UCzebcoAawBTyh62PdjF.ka.HIygQuhbb16HitF0IfX_cdZc2wVsIUfLSnSYulZaLnoSo.7..nRFnMyydrDjQE4tfOT08heVczyyR6Bpn.ZazNvmNZD1EgfxCRTcQDUdHFb_XDfPbqvX2N0dtYdKgSV_1s5u8RlyUwXr1HlqKEpKb83uWfIPLaOpm3xFnKupjRqj1UoDz.vB0iRRkkYtAd8nPoY654drckOD7GEQQs79zJyMTZV_ExNU72MAqvZRdRUZZz8oho.t6WzyX5R2pOSrPRgO84hba3Ez52DbM_08n8qRm3bW1TaviGW1VEwQVH74R_Eo0pxoZDfHTbAGC3vAAzz7R8sqLVphu972XyCB72Ba1XGElelViYqGnG3p_SZ_LzzpQMJdGSa"
             res = await self.http.request(
                 "POST",
-                f"https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/getUserRaffleCount?yGdtco4r={y_gdtco4r}",
-                headers={
-                    "Authorization": f"Bearer {self.market_token}",
-                    "Content-Length": "0",
-                },
-                data="",
+                "https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/getUserRaffleCount?id=12&channel=unicomTab",
+                headers={"Authorization": f"Bearer {self.market_token}"},
+                json={},
             )
 
             result = res["result"]
@@ -1355,7 +1078,7 @@ class CustomUserService:
                 self.logger.log(f"权益超市可抽奖次数: {count}")
 
             for i in range(count):
-                await asyncio.sleep(3)
+                await asyncio.sleep(4)
                 await self.market_raffle()
 
             # 抽奖完成后查询奖池信息（仅展示，全局只查一次）
@@ -1366,33 +1089,30 @@ class CustomUserService:
 
     async def market_raffle(self):
         try:
-            y_gdtco4r = "0rczhaAEqWhb2zAYqBszPmSenkNvPikBhEkGc5MEcyeTZhGCNS_RJHKyNyF3VUZARXyqjTIgGGgmauadjDCorC86QlFzBVqyXVjS1_YHL0dh3Kz.fDFEPcUP.E_1bREOCuXX8g0hQZ0Ix27h63PZGPeQgXabB6erqlLOku8Y34w5eALm2p0vNdaPrLm2ytWfYuBvZR3fVPQdrGnj2gIJkaOiRNaLqQNgOA3EEy6nBZs1cA74ke3uG3K2GLUGIbM6KRESorzR8Lz9HikYNRxj3cRfxj1ur2RO2wlSdY1C8ubWtosCgHPIFaw141bQlZW.mUyhEGJL3eox64bAf.Ll6VHqZYMDGAFYrWZeGhWX8HLSx626iO2tonW2mISGTgaZzS2g5AZcM7ihBBxhJfqUZ3gr6tvYWQTF7T0enm0xTW3yW986PfzxipD8rywjGRTbIrT7Nu5WYv.C5aZ03F9JJRdN5pyjYg7nl6P4kfeig8aNgPRrDlU8PfWHLrhgTprEbJNa2l4nAq6yBiELusVieHFEFWWYoCMq2ea9uIr5Q9akavKPJEfCTpQA"
+            timestamp = int(time.time() * 1000)
             res = await self.http.request(
                 "POST",
-                f"https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/userRaffle?yGdtco4r={y_gdtco4r}",
-                headers={
-                    "Authorization": f"Bearer {self.market_token}",
-                    "Content-Length": "0",
-                },
-                data="",
+                f"https://backward.bol.wo.cn/prod-api/promotion/home/raffleActivity/userRaffle?id=12&channel=unicomTab&timeVerRan={timestamp}",
+                headers={"Authorization": f"Bearer {self.market_token}"},
+                json={},
             )
 
             result = res["result"]
             if result and result.get("code") == 200:
                 data = result.get("data", {})
-                prize = data.get("prizesName") or "未抽中"
-                message = data.get("message", "")
-                if prize and prize != "未抽中":
+                is_winning = data.get("isWinning", False)
+                prize = data.get("prizesName") or ""
+                if is_winning and prize:
                     self.logger.log(f"权益超市抽奖: 恭喜抽中 {prize}", notify=True)
                 else:
-                    self.logger.log(f"权益超市抽奖: {message or prize}")
+                    self.logger.log("权益超市抽奖: 未抽中")
                 return True
             elif result and result.get("code") == 500:
                 # 触发人机验证
                 self.logger.log("权益超市: 触发人机验证，自动验证中...")
                 return await self.market_validate_captcha()
             else:
-                self.logger.log(f"权益超市抽奖失败: {result.get('message', result)}")
+                self.logger.log(f"权益超市抽奖失败: {result.get('msg', result)}")
                 return False
         except Exception as e:
             self.logger.log(f"权益超市抽奖异常: {str(e)}")
@@ -1554,7 +1274,7 @@ class CustomUserService:
         await self.wostore_cloud_sign(user_token)
 
         # 2. 等待后查询任务列表（触发状态同步）
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         await self.wostore_cloud_task_list(user_token)
 
         # 3. 领取抽奖次数 (taskCode 2508-01 "去赚积分")
@@ -1562,7 +1282,7 @@ class CustomUserService:
         await self.wostore_cloud_get_chance(user_token, "2508-01")
 
         # 4. 执行抽奖
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         await self.wostore_cloud_draw(user_token)
 
     async def wostore_cloud_login(self, ticket):
@@ -1768,7 +1488,7 @@ class CustomUserService:
 
                 if do_task:
                     await self.sign_do_task_from_list(do_task)
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1)
                     continue
 
                 # 优先级2: 领取已完成任务的奖励 (taskState: 0)
@@ -1780,7 +1500,7 @@ class CustomUserService:
 
                 if claim_task:
                     await self.sign_get_task_reward(claim_task.get("id"))
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(1)
                     continue
 
                 break
@@ -1800,7 +1520,7 @@ class CustomUserService:
                     task_url,
                     headers={"Referer": "https://img.client.10010.com/"},
                 )
-                await asyncio.sleep(5 + random.random() * 2)
+                await asyncio.sleep(random.random() * 2)
 
             # 获取 orderId
             order_id = await self.get_task_order_id()
@@ -1889,7 +1609,7 @@ class CustomUserService:
             await asyncio.sleep(1)
             await self._sec_get_user_info()  # 获取初始积分
             await self._sec_execute_all_tasks()
-            await asyncio.sleep(3)
+            await asyncio.sleep(1)
             await self._sec_get_user_info()  # 获取最终积分
 
         except Exception as e:
@@ -2037,7 +1757,7 @@ class CustomUserService:
                 del_result.get("code") in ["0000", 0]
                 or "成功" in str(del_result.get("msg", ""))
             ):
-                await asyncio.sleep(2)
+                await asyncio.sleep(1)
                 await self._sec_operate_blacklist(phone, 0)
 
     async def _sec_mark_phone_number(self):
@@ -2269,7 +1989,7 @@ class CustomUserService:
                 if finish_count != need_count:
                     remaining = need_count - finish_count
                     for _ in range(remaining):
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(1)
                         try:
                             if "签到" in task_name:
                                 await self._sec_sign_in(task_code)
@@ -2277,12 +1997,12 @@ class CustomUserService:
                                 break
                             else:
                                 await self._sec_finish_task(task_code, task_name)
-                                await asyncio.sleep(3)
+                                await asyncio.sleep(1)
                                 await self._sec_receive_points(task_code)
                         except Exception:
                             break
                 elif finish_text == "待领取":
-                    await asyncio.sleep(3)
+                    await asyncio.sleep(1)
                     await self._sec_receive_points(task_code)
 
         except Exception as e:
@@ -2744,7 +2464,7 @@ class CustomUserService:
                 json={"sign": sign},
             )
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
             # 增加阅读时长 addReadTime
             add_param = {
@@ -2842,22 +2562,21 @@ class CustomUserService:
             if result and str(result.get("code")) == "0000":
                 usable_num = result.get("data", {}).get("usableNum", 0)
                 self.logger.log(
-                    f"联通阅读话费红包余额: {float(usable_num) / 100:.2f}元", notify=True
+                    f"联通阅读话费红包余额: {float(usable_num) / 100:.2f}元",
+                    notify=True,
                 )
         except Exception as e:
             self.logger.log(f"联通阅读查询余额异常: {str(e)}")
 
     async def woread_task(self):
         """联通阅读任务入口"""
-        self.logger.log("============= 联通阅读 =============")
+        # self.logger.log("============= 联通阅读 =============")
         if not await self.woread_login():
             self.logger.log("联通阅读: 登录失败，跳过任务")
             return
 
         await self.woread_read_process()
-        # await asyncio.sleep(3)
         await self.woread_draw_new()
-        # await asyncio.sleep(3)
         await self.woread_queryTicketAccount()
         # self.logger.log("============= 联通阅读执行完毕 =============")
 
