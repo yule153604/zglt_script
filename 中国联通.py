@@ -41,6 +41,35 @@ WOCARE_SIGN_KEY = "f4cd4ffeb5554586acf65ba7110534f5"
 WOCARE_CHANNEL_TYPE = "wocareMBHServiceLife1"
 WOCARE_VERSION = "1"
 
+# ====================  Coupon Exchange Config (话费券兑换配置)  ====================
+# True=开启兑换, False=关闭兑换
+# 注意: 需要在抢兑时间段内才能兑换 (通常为 10:00-14:00, 18:00-22:00)
+EXCHANGE_COUPON_CONFIG = {
+    "1元话费券": False,  # 100积分, 满20元可用
+    "3元话费券": False,  # 300积分, 满30元可用
+    "5元话费券": True,  # 500积分, 满50元可用
+    "10元话费券": True,  # 1000积分, 满100元可用
+    "18元话费券": False,  # 1800积分, 满200元可用
+}
+
+# 话费券产品映射表 (名称 -> product_id)
+COUPON_PRODUCT_MAP = {
+    "1元话费券": "25122309441216995",
+    "3元话费券": "25122309482612026",
+    "5元话费券": "25122309512816188",
+    "10元话费券": "25122309543215732",
+    "18元话费券": "25122310293512803",
+}
+
+# 话费券积分需求表 (名称 -> 需要积分数, 积分=话费红包*100)
+COUPON_POINTS_REQUIRED = {
+    "1元话费券": 100,  # 需要1元话费红包
+    "3元话费券": 300,  # 需要3元话费红包
+    "5元话费券": 500,  # 需要5元话费红包
+    "10元话费券": 1000,  # 需要10元话费红包
+    "18元话费券": 1800,  # 需要18元话费红包
+}
+
 
 # ====================  Global Market Raffle State  ====================
 # 全局奖池状态，多账号共享，只查询一次
@@ -149,6 +178,10 @@ market_raffle_state = MarketRaffleState()
 
 
 # ====================  Utils  ====================
+# 全局打印锁，防止异步并发时日志输出混乱
+_print_lock = asyncio.Lock()
+
+
 class Logger:
     def __init__(self, prefix=""):
         self.prefix = prefix
@@ -156,7 +189,13 @@ class Logger:
     def log(self, message, notify=False):
         timestamp = datetime.now().strftime("%H:%M:%S")
         prefix_str = f"[{self.prefix}] " if self.prefix else ""
-        print(f"[{timestamp}] {prefix_str}{message}")
+        # 使用 print 的 flush 参数确保立即输出并换行
+        print(f"[{timestamp}] {prefix_str}{message}", flush=True)
+
+    async def log_async(self, message, notify=False):
+        """异步日志，使用锁防止并发输出混乱"""
+        async with _print_lock:
+            self.log(message, notify)
 
 
 class HttpClient:
@@ -402,6 +441,7 @@ class CustomUserService:
         await self.sign_get_telephone(is_initial=True)
         await self.sign_task_center()
         await self.sign_get_telephone(is_initial=False)
+        await self.sign_coupon_exchange()
 
     async def sign_get_telephone(self, is_initial=False):
         try:
@@ -906,6 +946,7 @@ class CustomUserService:
         await self.market_share_task()  # 分享小红书任务，获取额外抽奖机会
         await self.market_watering_task()
         await self.market_raffle_task()
+        await self.market_privilege_task()  # 优享权益领取
 
     async def market_login(self):
         target_url = "https://contact.bol.wo.cn/"
@@ -1116,6 +1157,203 @@ class CustomUserService:
                 return False
         except Exception as e:
             self.logger.log(f"权益超市抽奖异常: {str(e)}")
+            return False
+
+    async def market_privilege_task(self):
+        """优享权益: 每日领取一款权益"""
+        try:
+            if not self.market_token:
+                return
+
+            # 获取当前日期
+            now = datetime.now()
+            current_time = f"{now.year}-{now.month}-{now.day}"
+
+            # 获取活动详情
+            res = await self.http.request(
+                "POST",
+                "https://backward.bol.wo.cn/prod-api/promotion/activity/roll/getActivitiesDetail",
+                headers={
+                    "Authorization": f"Bearer {self.market_token}",
+                    "Content-Type": "application/json",
+                    "Referer": "https://contact.bol.wo.cn/",
+                },
+                json={
+                    "majorId": 3,
+                    "subCodeList": ["YOUCHOICEONE"],
+                    "currentTime": current_time,
+                    "withUserStatus": 1,
+                },
+            )
+
+            result = res["result"]
+            if not result or result.get("code") != 200:
+                self.logger.log(f"优享权益: 获取活动详情失败 {result.get('msg', '')}")
+                return
+
+            data_list = result.get("data", [])
+            if not data_list:
+                return
+
+            activity = data_list[0]
+            user_available_times = activity.get("userAvailableTimes", 0)
+
+            if user_available_times <= 0:
+                self.logger.log("优享权益: 今日已领取")
+                return
+
+            detail_list = activity.get("detailList", [])
+            if not detail_list:
+                return
+
+            # 筛选有库存的权益
+            available_items = [
+                item for item in detail_list if int(item.get("leftQuantity", 0)) > 0
+            ]
+
+            if not available_items:
+                self.logger.log("优享权益: 所有权益均无库存")
+                return
+
+            # 分类: 惊喜权益 vs 普通权益
+            surprise_items = [
+                item for item in available_items if item.get("isSurprise") == 1
+            ]
+            normal_items = [
+                item for item in available_items if item.get("isSurprise") != 1
+            ]
+
+            # 按sort降序排列 (sort越大可能价值越高)
+            surprise_items.sort(key=lambda x: int(x.get("sort", 0)), reverse=True)
+            normal_items.sort(key=lambda x: int(x.get("sort", 0)), reverse=True)
+
+            # 从活动中获取 activityId 和 activityCode
+            activity_id = activity.get("activityId")
+            activity_code = activity.get("activityCode", "YOUCHOICEONE")
+
+            # 优先尝试惊喜权益
+            for item in surprise_items:
+                product_name = item.get("productName", "")
+                product_id = item.get("id")
+                product_code = item.get("productCode", "")
+                is_unlock = item.get("isUnlock")
+                channel_id = item.get("channelId")
+                account_type = item.get("accountType", "4")
+
+                # 惊喜权益需要先解锁
+                if is_unlock == 0:
+                    unlock_success = await self._unlock_surprise_privilege(
+                        product_id, activity_code
+                    )
+                    if not unlock_success:
+                        self.logger.log(f"优享权益: [{product_name}] 解锁失败")
+                        continue
+
+                # 尝试领取
+                receive_success = await self._receive_privilege(
+                    activity_id,
+                    product_id,
+                    product_code,
+                    channel_id,
+                    account_type,
+                    current_time,
+                )
+                if receive_success:
+                    self.logger.log(
+                        f"优享权益: [{product_name}] 领取成功!", notify=True
+                    )
+                    return
+                else:
+                    self.logger.log(f"优享权益: [{product_name}] 领取失败")
+
+            # 如果惊喜权益都失败了，尝试普通权益
+            for item in normal_items:
+                product_name = item.get("productName", "")
+                product_id = item.get("id")
+                product_code = item.get("productCode", "")
+                channel_id = item.get("channelId")
+                account_type = item.get("accountType", "4")
+
+                receive_success = await self._receive_privilege(
+                    activity_id,
+                    product_id,
+                    product_code,
+                    channel_id,
+                    account_type,
+                    current_time,
+                )
+                if receive_success:
+                    self.logger.log(
+                        f"优享权益: [{product_name}] 领取成功!", notify=True
+                    )
+                    return
+                else:
+                    self.logger.log(f"优享权益: [{product_name}] 领取失败")
+
+            self.logger.log("优享权益: 所有权益领取失败")
+
+        except Exception as e:
+            self.logger.log(f"优享权益异常: {str(e)}")
+
+    async def _unlock_surprise_privilege(self, product_id, activity_code):
+        """解锁惊喜权益"""
+        try:
+            timestamp = int(time.time() * 1000)
+            res = await self.http.request(
+                "POST",
+                "https://backward.bol.wo.cn/prod-api/promotion/activity/roll/unlock/surpriseInterest",
+                headers={
+                    "Authorization": f"Bearer {self.market_token}",
+                    "Content-Type": "application/json",
+                    "Referer": "https://contact.bol.wo.cn/",
+                },
+                json={
+                    "timeVerRan": timestamp,
+                    "mobile": self.mobile,
+                    "id": product_id,
+                    "activityId": activity_code,
+                },
+            )
+
+            result = res["result"]
+            return result and result.get("code") == 200
+
+        except Exception:
+            return False
+
+    async def _receive_privilege(
+        self,
+        activity_id,
+        product_id,
+        product_code,
+        channel_id,
+        account_type,
+        current_time,
+    ):
+        """领取权益"""
+        try:
+            res = await self.http.request(
+                "POST",
+                "https://backward.bol.wo.cn/prod-api/promotion/activity/roll/receiveRights",
+                headers={
+                    "Authorization": f"Bearer {self.market_token}",
+                    "Content-Type": "application/json",
+                    "Referer": "https://contact.bol.wo.cn/",
+                },
+                json={
+                    "channelId": channel_id,
+                    "activityId": activity_id,
+                    "productId": product_id,
+                    "productCode": product_code,
+                    "currentTime": current_time,
+                    "accountType": account_type,
+                },
+            )
+
+            result = res["result"]
+            return result and result.get("code") == 200
+
+        except Exception:
             return False
 
     # ====================  Xinjiang (xj)  ====================
@@ -1452,7 +1690,7 @@ class CustomUserService:
     async def sign_task_center(self):
         """签到区-任务中心: 获取任务列表、执行任务、领取奖励"""
         try:
-            for i in range(30):  # 最多循环30次，防止死循环
+            for i in range(20):  # 最多循环20次，防止死循环
                 res = await self.http.request(
                     "GET",
                     "https://activity.10010.com/sixPalaceGridTurntableLottery/task/taskList",
@@ -1505,8 +1743,234 @@ class CustomUserService:
 
                 break
 
+            # 检查月签到奖励
+            await self.sign_month_reward()
+
         except Exception as e:
             self.logger.log(f"签到区-任务中心异常: {str(e)}")
+
+    async def sign_month_reward(self):
+        """签到区-月签到奖励: 检查并领取每月连签礼奖励"""
+        try:
+            res = await self.http.request(
+                "GET",
+                "https://activity.10010.com/sixPalaceGridTurntableLottery/floor/getMonthSign",
+                headers={"Referer": "https://img.client.10010.com/"},
+            )
+
+            result = res["result"]
+            code = str(result.get("code", "")) if result else ""
+
+            if code != "0000":
+                return
+
+            task_list = result.get("data", {}).get("taskList", [])
+
+            for task in task_list:
+                task_status = str(task.get("taskStatus", ""))
+                # taskStatus: 2=已领取, 1=待领取, 0=不可领取
+                if task_status == "1":
+                    task_id = task.get("taskId", "")
+                    task_name = task.get("taskName", "")
+                    id_ = task.get("id", "")
+
+                    if task_id and id_:
+                        reward_res = await self.http.request(
+                            "GET",
+                            "https://activity.10010.com/sixPalaceGridTurntableLottery/task/getTaskReward",
+                            params={
+                                "taskId": task_id,
+                                "taskType": "30",
+                                "id": id_,
+                            },
+                            headers={"Referer": "https://img.client.10010.com/"},
+                        )
+
+                        reward_result = reward_res["result"]
+                        reward_code = (
+                            str(reward_result.get("code", "")) if reward_result else ""
+                        )
+
+                        if reward_code == "0000":
+                            data = reward_result.get("data", {})
+                            if str(data.get("code", "")) == "0000":
+                                prize_name = data.get("prizeName", "")
+                                prize_name_red = data.get("prizeNameRed", "")
+                                self.logger.log(
+                                    f"签到区-月签奖励: [{task_name}] {prize_name}{prize_name_red}",
+                                    notify=True,
+                                )
+
+                        await asyncio.sleep(1)
+
+        except Exception:
+            pass
+
+    async def sign_coupon_exchange(self):
+        """签到区-话费券兑换: 根据配置尝试兑换话费券"""
+        try:
+            # 检查是否有任何启用的兑换配置
+            enabled_coupons = [
+                name for name, enabled in EXCHANGE_COUPON_CONFIG.items() if enabled
+            ]
+            if not enabled_coupons:
+                return
+
+            # 获取奖品列表
+            prize_list = await self._get_coupon_prize_list()
+            if not prize_list:
+                return
+
+            # 获取当前话费红包积分 (积分 = 话费红包 * 100)
+            current_points = int(self.initial_telephone_amount * 100)
+
+            # 遍历启用的话费券配置
+            for coupon_name in enabled_coupons:
+                product_id = COUPON_PRODUCT_MAP.get(coupon_name)
+                if not product_id:
+                    continue
+
+                # 在奖品列表中查找对应商品
+                prize_info = self._find_prize_in_list(prize_list, product_id)
+                if not prize_info:
+                    continue
+
+                # 检查是否已兑换过 (buttonDTO.name = "面额已参与兑换")
+                button_dto = prize_info.get("buttonDTO")
+                if button_dto and button_dto.get("name") == "面额已参与兑换":
+                    self.logger.log(f"签到区-话费券: [{coupon_name}] 今日已兑换")
+                    continue
+
+                # 检查库存 (无库存直接略过，不显示)
+                stock_surplus = int(prize_info.get("stockSurplus", 0))
+                if stock_surplus <= 0:
+                    continue
+
+                # 检查积分是否达到兑换门槛
+                required_points = COUPON_POINTS_REQUIRED.get(coupon_name, 0)
+                if current_points < required_points:
+                    self.logger.log(
+                        f"签到区-话费券: [{coupon_name}] 积分不足 (需要{required_points}, 当前{current_points})"
+                    )
+                    continue
+
+                # 执行兑换 (连续尝试3次)
+                for attempt in range(3):
+                    await self._do_coupon_exchange(
+                        product_id, prize_info.get("type_code", "21003_01")
+                    )
+                    await asyncio.sleep(0.5)
+
+                # 等待并验证兑换结果
+                await asyncio.sleep(1)
+                new_prize_list = await self._get_coupon_prize_list()
+                if new_prize_list:
+                    new_prize_info = self._find_prize_in_list(
+                        new_prize_list, product_id
+                    )
+                    if new_prize_info:
+                        # 检查是否出现 buttonDTO 字段 (表示已兑换成功)
+                        new_button_dto = new_prize_info.get("buttonDTO")
+                        if (
+                            new_button_dto
+                            and new_button_dto.get("name") == "面额已参与兑换"
+                        ):
+                            self.logger.log(
+                                f"签到区-话费券: [{coupon_name}] 兑换成功!", notify=True
+                            )
+                        else:
+                            self.logger.log(f"签到区-话费券: [{coupon_name}] 兑换失败")
+                    else:
+                        self.logger.log(f"签到区-话费券: [{coupon_name}] 验证失败")
+
+                await asyncio.sleep(1)
+
+        except Exception as e:
+            self.logger.log(f"签到区-话费券兑换异常: {str(e)}")
+
+    async def _get_coupon_prize_list(self):
+        """获取话费券奖品列表"""
+        try:
+            res = await self.http.request(
+                "POST",
+                "https://act.10010.com/SigninApp/new_convert/prizeList",
+                headers={
+                    "Referer": "https://img.client.10010.com/",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data="",
+            )
+
+            result = res["result"]
+            status = str(result.get("status", "")) if result else ""
+
+            if status != "0000":
+                return None
+
+            # 提取当前有效时段的奖品列表
+            tab_items = result.get("data", {}).get("datails", {}).get("tabItems", [])
+            for tab in tab_items:
+                # 找到当前有效的时段 (defaultShowList=true 且 state="抢兑中")
+                if tab.get("defaultShowList") and tab.get("state") == "抢兑中":
+                    return tab.get("timeLimitQuanListData", [])
+
+            return None
+
+        except Exception:
+            return None
+
+    def _find_prize_in_list(self, prize_list, product_id):
+        """在奖品列表中查找指定商品"""
+        for prize in prize_list:
+            if prize.get("product_id") == product_id:
+                return prize
+        return None
+
+    async def _do_coupon_exchange(self, product_id, type_code):
+        """执行话费券兑换"""
+        try:
+            # Step 1: 获取兑换 UUID
+            uuid_res = await self.http.request(
+                "POST",
+                "https://act.10010.com/SigninApp/convert/prizeConvert",
+                headers={
+                    "Referer": "https://img.client.10010.com/",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data=f"product_id={product_id}&typeCode={type_code}",
+            )
+
+            uuid_result = uuid_res["result"]
+            uuid_status = str(uuid_result.get("status", "")) if uuid_result else ""
+
+            if uuid_status != "0000":
+                return False
+
+            uuid = uuid_result.get("data", {}).get("uuid", "")
+            if not uuid:
+                return False
+
+            # Step 2: 执行兑换
+            exchange_res = await self.http.request(
+                "POST",
+                "https://act.10010.com/SigninApp/convert/prizeConvertResult",
+                headers={
+                    "Referer": "https://img.client.10010.com/",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data=f"uuid={uuid}",
+            )
+
+            exchange_result = exchange_res["result"]
+            exchange_status = (
+                str(exchange_result.get("status", "")) if exchange_result else ""
+            )
+
+            # 注意: 即使返回失败也可能实际成功，需要通过库存验证
+            return exchange_status == "0000"
+
+        except Exception:
+            return False
 
     async def sign_do_task_from_list(self, task):
         """执行签到区任务"""
