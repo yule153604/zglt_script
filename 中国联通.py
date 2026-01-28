@@ -118,16 +118,11 @@ class MarketRaffleState:
 
         def get_display_width(s):
             """计算字符串显示宽度（中文占2，英文占1）"""
-            width = 0
-            for c in s:
-                width += 2 if ord(c) > 127 else 1
-            return width
+            return sum(2 if ord(c) > 127 else 1 for c in s)
 
         def pad_to_width(s, target_width):
             """填充字符串到指定显示宽度"""
-            current_width = get_display_width(s)
-            padding = target_width - current_width
-            return s + " " * max(0, padding)
+            return s + " " * max(0, target_width - get_display_width(s))
 
         async with self.lock:
             if self.checked:
