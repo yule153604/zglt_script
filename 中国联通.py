@@ -47,6 +47,9 @@ APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
 WOREAD_PRODUCT_ID, WOREAD_SECRET_KEY, WOREAD_PASSWORD, WOREAD_IV = "10000002", "7k1HcDL8RKvc", "woreadst^&*12345", "16-Bytes--String"
 WOCARE_CHANNEL_ID, WOCARE_SIGN_KEY, WOCARE_CHANNEL_TYPE, WOCARE_VERSION = "beea1c7edf7c4989b2d3621c4255132f", "f4cd4ffeb5554586acf65ba7110534f5", "wocareMBHServiceLife1", "1"
+AITING_BASE_URL, AITING_SIGN_KEY_APPKEY, AITING_SIGN_KEY_API = "https://pcc.woread.com.cn", "7ZxQ9rT3wE5sB2dF", "woread!@#qwe1234"
+AITING_SIGN_KEY_REQUERTID, AITING_CLIENT_KEY, AITING_AES_KEY, AITING_AES_IV = "46iCw24ewAZbNkK6", "1", "j2K81755sxV12wFx", "16-Bytes--String"
+ADDREADTIME_AES_KEY = "UNS#READDAY39COM"
 EXCHANGE_COUPON_CONFIG = {"1元话费券": False, "3元话费券": False, "5元话费券": True, "10元话费券": True, "18元话费券": False}
 COUPON_PRODUCT_MAP = {k: v for k, v in zip(EXCHANGE_COUPON_CONFIG.keys(), ["25122309441216995", "25122309482612026", "25122309512816188", "25122309543215732", "25122310293512803"])}
 COUPON_POINTS_REQUIRED = {k: int(k.split("元")[0]) * 100 for k in EXCHANGE_COUPON_CONFIG}
@@ -191,11 +194,15 @@ class CustomUserService:
     async def sign_get_telephone(self, is_initial=False):
         res = await self.http.post("https://act.10010.com/SigninApp/convert/getTelephone", data={}, headers={"Referer": "https://img.client.10010.com/"})
         if (result := res["result"]) and str(result.get("status")) == "0000" and (data := result.get("data")):
-            current = float(data.get("telephone") or 0)
+            telephone = data.get("telephone") or "0"
+            if telephone == "--": telephone = "0"
+            current = float(telephone)
             if is_initial: self.initial_telephone_amount = current; return
             increase = current - self.initial_telephone_amount
             msg = f"签到区-话费红包: 总额 {current:.2f}元，本次增加 {increase:.2f}元"
-            if (need_exp := float(data.get("needexpNumber") or 0)) > 0: msg += f",其中 {need_exp}元 将于 {data.get('month')}月底到期"
+            needexp = data.get("needexpNumber") or "0"
+            if needexp == "--": needexp = "0"
+            if (need_exp := float(needexp)) > 0: msg += f",其中 {need_exp}元 将于 {data.get('month')}月底到期"
             self.logger.log(msg, notify=True)
         else: self.logger.log(f"签到区查询话费红包失败: {result.get('msg') if result else ''}")
 
@@ -299,7 +306,9 @@ class CustomUserService:
         res = await self.wocare_api("loginmbh", {"sid": self.wocare_sid, "channelType": WOCARE_CHANNEL_TYPE, "apiCode": "loginmbh"})
         if (result := res["result"]) and str(result.get("resultCode")) == "0000":
             token = result.get("data", {}).get("token")
-            if token: self.wocare_token = token; return True
+            if token:
+                self.wocare_token = token
+                return True
             self.logger.log(f"联通祝福登录成功但无token: {result}")
         else: self.logger.log(f"联通祝福登录失败: {result}")
         return False
@@ -317,8 +326,10 @@ class CustomUserService:
             if (result := res["result"]) and (msg := result.get("messageContent")):
                 try:
                     import re
-                    msg = (re.sub(r"[^a-zA-Z0-9+/=\-_]", "", msg).replace("-", "+").replace("_", "/")) + "=" * (4 - len(msg) % 4) if len(msg) % 4 else ""
-                    parsed = json.loads(base64.b64decode(msg).decode())
+                    msg_clean = re.sub(r"[^a-zA-Z0-9+/=\-_]", "", msg).replace("-", "+").replace("_", "/")
+                    if len(msg_clean) % 4:
+                        msg_clean += "=" * (4 - len(msg_clean) % 4)
+                    parsed = json.loads(base64.b64decode(msg_clean).decode())
                     result["data"] = parsed.get("data", parsed)
                     if parsed.get("resultMsg"): result["resultMsg"] = parsed["resultMsg"]
                 except: pass
@@ -465,29 +476,6 @@ class CustomUserService:
             return res["result"] and res["result"].get("code") == 200
         except: return False
 
-    async def xj_task(self):
-        if "新疆" not in self.province: return
-        if not (ticket_info := await self.open_plat_line_new("https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=155&type=02"))["ticket"]: return
-        if await self.xj_get_token(ticket_info["ticket"]): await self.xj_do_draw("Jan2026Act")
-
-    @async_task("新疆联通获取Token")
-    async def xj_get_token(self, ticket):
-        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/getTokenAndCity", headers={"Referer": f"https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=155&type=02&ticket={ticket}", "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"ticket": ticket})
-        if (result := res["result"]) and result.get("code") == 0:
-            self.xj_token = result.get("data", {}).get("token")
-            return True
-        self.logger.log(f"新疆联通获取Token失败: {result}"); return False
-
-    @async_task("新疆联通抽奖")
-    async def xj_do_draw(self, activity_id="dakaJan2026Act"):
-        prize_dict = {"5Gksjhjhyyk": "5G宽视界黄金会员-月卡", "hfq_five": "5元话费券(50-5)", "hfq_ten": "10元话费券(100-10)", "aqyhjVIPhyyk": "爱奇艺黄金VIP会员-月卡", "ddkc30ydjq": "滴滴快车30元代金券", "jdPLUShyjdnk": "京东PLUS会员京典-年卡", "qybbxyk": "权益百宝箱-月卡", "xmlyVIPhynk": "喜马拉雅VIP会员-年卡", "mtwmhblly": "美团外卖红包66元", "thanks1": "未中奖"}
-        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_Jan2026Act", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest"}, data={"activityId": activity_id, "prizeId": ""})
-        msg = (result := res["result"]).get("msg") or result.get("data")
-        if msg in prize_dict: self.logger.log(f"新疆联通[{activity_id}]抽奖结果: {prize_dict[msg]}", notify=True)
-        elif result.get("code") in [0, "SUCCESS"]: self.logger.log(f"新疆联通[{activity_id}]成功: {msg}", notify=True)
-        elif msg and ("已经打过卡" in msg or "机会已用完" in msg): self.logger.log(f"新疆联通[{activity_id}]: {msg}")
-        else: self.logger.log(f"新疆联通[{activity_id}]失败: {msg}")
-
     async def xj_usersday_task(self):
         if "新疆" not in self.province: return
         if not (ticket_info := await self.open_plat_line_new("https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=166&type=02"))["ticket"]: return
@@ -499,10 +487,18 @@ class CustomUserService:
             else: self.logger.log("联通客户日: 今日无秒杀活动")
         else: self.logger.log("联通客户日: 未到12点秒杀时间")
 
+    @async_task("新疆联通获取Token")
+    async def xj_get_token(self, ticket):
+        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/getTokenAndCity", headers={"Referer": f"https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=166&type=02&ticket={ticket}", "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"ticket": ticket})
+        if (result := res["result"]) and result.get("code") == 0:
+            self.xj_token = result.get("data", {}).get("token")
+            return True
+        self.logger.log(f"新疆联通获取Token失败: {result}"); return False
+
     @async_task("客户日秒杀")
     async def xj_usersday_draw(self, prize_id):
         prize_dict = {"hfq_twenty": "20元话费券(100-20)", "right_kdjdjq_ten": "肯德基10元代金券"}
-        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_UsersDay2025Act", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest"}, data={"activityId": "usersDay2025Act", "prizeId": prize_id})
+        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_UsersDay2025Act", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest"}, data={"activityId": "usersDay2026Act", "prizeId": prize_id})
         if (result := res["result"]) and result.get("code") in [0, "SUCCESS"]: self.logger.log(f"客户日秒杀成功: {prize_dict.get(prize_id, prize_id)}", notify=True)
         else: self.logger.log(f"客户日秒杀失败: {result.get('data') or result.get('msg')}")
 
@@ -890,9 +886,212 @@ class CustomUserService:
         await self.woread_draw_new()
         await self.woread_queryTicketAccount()
 
+    # ==================== 联通爱听专区 ====================
+    def generate_random_imei(self):
+        tac = "".join(str(random.randint(0, 9)) for _ in range(8))
+        snr = "".join(str(random.randint(0, 9)) for _ in range(6))
+        imei_base = tac + snr
+        digits = [int(d) for d in imei_base]
+        for i in range(len(digits) - 1, -1, -2):
+            digits[i] *= 2
+            if digits[i] > 9: digits[i] -= 9
+        check_digit = (10 - sum(digits) % 10) % 10
+        return imei_base + str(check_digit)
+
+    def aiting_get_aes(self, data, key):
+        text = json.dumps(data, separators=(",", ":")) if isinstance(data, (dict, list)) else str(data)
+        cipher = AES.new(key[:16].encode(), AES.MODE_CBC, AITING_AES_IV.encode())
+        return base64.b64encode(cipher.encrypt(pad(text.encode(), AES.block_size)).hex().encode()).decode()
+
+    def aiting_aes_encrypt(self, data, key, iv):
+        text = json.dumps(data, separators=(",", ":")) if isinstance(data, (dict, list)) else str(data)
+        cipher = AES.new(key.encode(), AES.MODE_CBC, iv.encode())
+        return base64.b64encode(cipher.encrypt(pad(text.encode(), AES.block_size)).hex().upper().encode()).decode()
+
+    aiting_generate_sign = lambda self, params, key: hashlib.md5(f"{'&'.join(f'{k}={params[k]}' for k in sorted(params))}&key={key}".encode()).hexdigest()
+    aiting_generate_woid = lambda self, imei: f"WOA{self.random_string(6)}{imei[:8] if len(imei) >= 8 else imei.ljust(8, '0')}LOT{self.random_string(4)}LV{self.random_string(2)}"
+    aiting_calculate_clientconfirm = lambda self, userid, imei: self.aiting_aes_encrypt(f"android{userid}{imei}", AITING_AES_KEY, AITING_AES_IV)
+    aiting_calculate_passcode = lambda self, timestamp, phone: hashlib.md5(f"{timestamp}{phone}{AITING_CLIENT_KEY}".encode()).hexdigest()
+    aiting_build_statisticsinfo = lambda self, userid, useraccount, imei, clientconfirm: "&".join(f"{k}={v}" for k, v in {"channelid": "28015001", "sid": self.random_string(20), "eid": self.random_string(20), "osversion": "Android12", "clientallid": "000000100000000000058.0.2.1225", "display": "2400_1080", "ip": "192.168.3.24", "nettypename": "wifi", "version": "802", "versionname": "8.0.2", "terminalName": "Redmi", "terminalType": "Redmi_K30_Pro", "udid": "null", "woid": self.aiting_generate_woid(imei), "useraccount": useraccount, "userid": userid, "clientconfirm": clientconfirm}.items())
+
+    def _aiting_requertid(self, timestamp=None, nonce=None):
+        ts = timestamp or str(int(time.time() * 1000))
+        nc = nonce or str(random.randint(100000, 999999))
+        sign_params = {"jwt": self.aiting_jwt, "nonestr": nc, "osversion": "Android12", "terminalName": "Redmi", "timestamp": ts}
+        return ts, nc, hashlib.md5(f"{'&'.join(f'{k}={sign_params[k]}' for k in sorted(sign_params))}&key={AITING_SIGN_KEY_REQUERTID}".encode()).hexdigest()
+
+    def _aiting_headers(self, ts, nonce, requertid):
+        return {"AuthorizationClient": f"Bearer {self.aiting_jwt}", "requerttime": ts, "nonestr": nonce, "requertid": requertid, "statisticsinfo": self.aiting_statisticsinfo, "User-Agent": "okhttp/4.9.0"}
+
+    @async_task("爱听获取JWT")
+    async def aiting_get_jwt_token(self, statisticsinfo):
+        timestamp = str(int(time.time() * 1000))
+        sign_params = {"clientSource": "3", "clientId": "android", "source": "3", "timestamp": timestamp}
+        sign = self.aiting_generate_sign(sign_params, AITING_SIGN_KEY_APPKEY)
+        client_id_b64 = base64.b64encode("395DEDE9C1D6FE11B7C9C0D82B353E74".encode()).decode()
+        res = await self.http.post(f"{AITING_BASE_URL}/oauth/client/appkey", headers={"Skip-Authorization-Check": "true", "statisticsinfo": statisticsinfo, "Content-Type": "application/json"}, json={"clientSource": "3", "clientId": client_id_b64, "source": "3", "timestamp": timestamp, "sign": sign})
+        return result.get("key") if (result := res["result"]) and result.get("code") == "0000" else None
+
+    @async_task("爱听获取Profile")
+    async def aiting_get_read_profile(self, user_token, userid, jwt_token, statisticsinfo):
+        req_time, nonce = str(int(time.time() * 1000)), str(random.randint(100000, 999999))
+        sign_params = {"jwt": jwt_token, "nonestr": nonce, "osversion": "Android12", "terminalName": "Redmi", "timestamp": req_time}
+        requertid = hashlib.md5(f"{'&'.join(f'{k}={sign_params[k]}' for k in sorted(sign_params))}&key={AITING_SIGN_KEY_REQUERTID}".encode()).hexdigest()
+        res = await self.http.get(f"{AITING_BASE_URL}/pcc/rest/sns/profile/readprofile/7", params={"userid": userid, "token": user_token, "encryptflag": "1"}, headers={"User-Agent": "okhttp/4.9.0", "requerttime": req_time, "nonestr": nonce, "requertid": requertid, "AuthorizationClient": f"Bearer {jwt_token}", "statisticsinfo": statisticsinfo})
+        return result.get("message") if (result := res["result"]) and result.get("code") == "0000" else None
+
+    @async_task("爱听业务登录")
+    async def aiting_api_login(self, phone, useraccount, jwt_token, statisticsinfo):
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        passcode = self.aiting_calculate_passcode(timestamp, phone)
+        url = f"{AITING_BASE_URL}/mainrest/rest/read/user/ulogin//3/{useraccount}/1/1/0?networktype=3&ua=Redmi+K30+Pro&isencode=true&clientversion=8.0.2&versionname=Android_1_1080x2356&channelid=28015001&userlabelisencode=1&validatecode=&sid=&timestamp={timestamp}&passcode={passcode}"
+        req_time, nonce = str(int(time.time() * 1000)), str(random.randint(100000, 999999))
+        sign_params = {"jwt": jwt_token, "nonestr": nonce, "osversion": "Android12", "terminalName": "Redmi", "timestamp": req_time}
+        requertid = hashlib.md5(f"{'&'.join(f'{k}={sign_params[k]}' for k in sorted(sign_params))}&key={AITING_SIGN_KEY_REQUERTID}".encode()).hexdigest()
+        res = await self.http.get(url, headers={"statisticsinfo": statisticsinfo, "requerttime": req_time, "nonestr": nonce, "requertid": requertid, "AuthorizationClient": f"Bearer {jwt_token}", "User-Agent": "okhttp/4.9.0"})
+        if (result := res["result"]) and result.get("code") == "0000" and (msg := result.get("message")):
+            token = msg.get("accountinfo", {}).get("token") or msg.get("token")
+            return {"token": token, "userid": msg.get("accountinfo", {}).get("userid") or msg.get("userid")} if token else None
+        return None
+
+    @async_task("爱听登录流程")
+    async def aiting_login_flow(self):
+        if not (self.woread_token and self.woread_userid): return self.logger.log("爱听: 需要先完成联通阅读登录") or False
+        self.aiting_woread_token, self.aiting_base_userid = self.woread_token, self.woread_userid
+        phone, imei = self.mobile, self.generate_random_imei()
+        clientconfirm = self.aiting_calculate_clientconfirm(self.aiting_base_userid, imei)
+        temp_stats = self.aiting_build_statisticsinfo(self.aiting_base_userid, phone, imei, clientconfirm)
+        self.aiting_jwt = await self.aiting_get_jwt_token(temp_stats)
+        if not self.aiting_jwt: return False
+        profile_msg = await self.aiting_get_read_profile(self.aiting_woread_token, self.aiting_base_userid, self.aiting_jwt, temp_stats)
+        if not profile_msg or not profile_msg.get("mobile"): return False
+        real_useraccount = profile_msg["mobile"]
+        self.aiting_statisticsinfo = self.aiting_build_statisticsinfo(self.aiting_base_userid, real_useraccount, imei, clientconfirm)
+        login_data = await self.aiting_api_login(phone, real_useraccount, self.aiting_jwt, self.aiting_statisticsinfo)
+        if not login_data: return False
+        self.aiting_token, self.aiting_userid = login_data["token"], login_data["userid"]
+        self.logger.log("爱听登录成功")
+        return True
+
+    @async_task("爱听获取Ticket")
+    async def aiting_get_ticket(self):
+        ts, nonce, requertid = self._aiting_requertid()
+        sign = self.aiting_generate_sign({"timestamp": ts, "token": self.aiting_token, "userid": self.aiting_userid}, AITING_SIGN_KEY_API)
+        res = await self.http.post(f"{AITING_BASE_URL}/activity/rest/unicom/points/getInfoTicket", headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"}, json={"sign": sign, "timestamp": ts, "token": self.aiting_token, "userid": self.aiting_userid})
+        if (result := res["result"]) and result.get("code") == "0000" and (msg := result.get("message")) and "ticket=" in msg:
+            return parse_qs(urlparse(msg).query).get("ticket", [""])[0]
+        return None
+
+    @async_task("爱听签到")
+    async def aiting_sign_in(self):
+        ts, nonce, requertid = self._aiting_requertid()
+        res = await self.http.get(f"https://woread.com.cn/rest/read/usersign/sign/3/{self.aiting_base_userid}/{self.aiting_woread_token}", params={"isresign": "0", "isnewversion": "1", "isfreeLimt": "0"}, headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"})
+        if (result := res["result"]) and result.get("code") == "0000":
+            self.logger.log(f"爱听签到成功: {result.get('desc', '')} (连续{result.get('continuousDays', 0)}天)", notify=True)
+        else: self.logger.log(f"爱听签到: {result.get('desc') or result.get('message') or '失败'}")
+
+    get_jf_headers = lambda self, ticket: {"ticket": ticket, "pageid": "s789081246969976832", "clienttype": "aiting_android", "partnersid": "1706", "content-type": "application/json;charset=UTF-8", "User-Agent": "Mozilla/5.0 (Linux; Android 12; Redmi K30 Pro) AppleWebKit/537.36 WoReaderApp/Android", "Origin": "https://m.jf.10010.com", "Referer": f"https://m.jf.10010.com/jf-external-application/index.html?ticket={ticket}&pageID=s789081246969976832"}
+
+    @async_task("爱听查询积分")
+    async def jf_get_user_info(self, ticket):
+        res = await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/userInfo", headers=self.get_jf_headers(ticket), json={})
+        if (result := res["result"]) and result.get("code") == "0000" and (data := result.get("data")):
+            self.logger.log(f"爱听积分: 今日已赚{data.get('todayEarnScore', 0)}, 余额{data.get('availableScore', 0)}", notify=True)
+            return data
+        return None
+
+    @async_task_silent
+    async def jf_get_task_detail(self, ticket):
+        res = await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/taskDetail", headers=self.get_jf_headers(ticket), json={})
+        return result["data"]["taskDetail"].get("taskList", []) if (result := res["result"]) and result.get("data", {}).get("taskDetail") else []
+
+    @async_task_silent
+    async def jf_to_finish(self, ticket, task_code):
+        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/toFinish", headers=self.get_jf_headers(ticket), json={"taskCode": task_code})
+
+    @async_task_silent
+    async def jf_pop_up(self, ticket):
+        return (await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/popUp", headers=self.get_jf_headers(ticket), json={}))["result"]
+
+    @async_task_silent
+    async def aiting_complete_task_api(self, task_type):
+        ts, nonce, requertid = self._aiting_requertid()
+        body = {"source": "3", "timestamp": ts, "token": self.aiting_woread_token, "type": str(task_type), "userid": self.aiting_base_userid}
+        body["sign"] = self.aiting_generate_sign(body, AITING_SIGN_KEY_API)
+        await self.http.post(f"{AITING_BASE_URL}/activity/rest/unicom/points/completiontask", headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"}, json=body)
+
+    @async_task_silent
+    async def aiting_get_secretkey(self):
+        ts, nonce, requertid = self._aiting_requertid()
+        res = await self.http.get(f"https://woread.com.cn/rest/read/statistics/getsecretkey/3/{self.aiting_base_userid}", params={"token": self.aiting_woread_token}, headers=self._aiting_headers(ts, nonce, requertid))
+        return result.get("message") if (result := res["result"]) and result.get("code") == "0000" else None
+
+    @async_task_silent
+    async def aiting_add_read_time(self, read_time_seconds):
+        if not (secretkey := await self.aiting_get_secretkey()): return
+        ts, nonce, requertid = self._aiting_requertid()
+        count_time, book_id = str(read_time_seconds * 1000), "4524960"
+        encrypted = self.aiting_aes_encrypt({"userid": self.aiting_base_userid, "counttime": count_time, "timestamp": ts, "secretkey": secretkey, "cntindex": book_id, "cnttype": 1, "readtype": 1}, ADDREADTIME_AES_KEY, AITING_AES_IV)
+        await self.http.post(f"https://woread.com.cn/rest/read/statistics/addreadtime/3/{encrypted}", headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"}, json={"channelid": "28015001", "creadertime": datetime.now().strftime("%y%m%d%H%M%S"), "imei": self.generate_random_imei(), "list": {"cntindex": book_id, "cnttype": 1, "readtime": count_time, "readtype": 1}, "list1": [{"cntindex": book_id, "cnttype": 1, "readtime": count_time, "readtype": 1}], "listentimes": count_time, "uuid": self.random_string(32)})
+
+    @async_task_silent
+    async def aiting_new_read_add(self):
+        ts, nonce, requertid = self._aiting_requertid()
+        await self.http.post(f"https://woread.com.cn/rest/read/new/newreadadd/3/{self.aiting_base_userid}/{self.aiting_woread_token}", params={"isfreeLimt": "0", "isgray": "true"}, headers={**self._aiting_headers(ts, nonce, requertid), "User-Agent": "Redmi K30 Pro", "Content-Type": "application/json"}, json={"source": 3, "cntindex": "4524960", "chapterallindex": "100136247350", "readtype": 3})
+
+    @async_task("爱听执行任务")
+    async def aiting_do_tasks(self, ticket):
+        task_list = await self.jf_get_task_detail(ticket)
+        if not task_list: return
+        todo_list = [t for t in task_list if t.get("finish") == 0 and "邀请" not in t.get("taskName", "")]
+        if not todo_list: return self.logger.log("爱听任务: 所有任务已完成")
+        self.logger.log(f"爱听任务: 发现{len(todo_list)}个待办任务")
+        read_tasks = [t for t in todo_list if ("阅读" in t.get("taskName", "") or "听读" in t.get("taskName", "")) and "邀请" not in t.get("taskName", "")]
+        for task in read_tasks:
+            remaining = (task.get("needCount", 1) or 1) - (task.get("finishCount", 0) or 0)
+            if remaining <= 0: continue
+            self.logger.log(f"爱听执行阅读任务: {task.get('taskName')} (剩余{remaining}次)")
+            for i in range(remaining):
+                await self.jf_to_finish(ticket, task.get("taskCode"))
+                await self.aiting_new_read_add()
+                await asyncio.sleep(5)
+                await self.aiting_add_read_time(120)
+                await asyncio.sleep(2)
+                if (res := await self.jf_pop_up(ticket)) and res.get("data", {}).get("score"):
+                    self.logger.log(f"爱听阅读任务获得{res['data']['score']}积分", notify=True)
+                await asyncio.sleep(2)
+        notify_task = next((t for t in todo_list if "通知" in t.get("taskName", "")), None)
+        if notify_task:
+            await self.jf_to_finish(ticket, notify_task.get("taskCode"))
+            await asyncio.sleep(1)
+            await self.aiting_complete_task_api(2)
+            await asyncio.sleep(2)
+            if (res := await self.jf_pop_up(ticket)) and res.get("data", {}).get("score"):
+                self.logger.log(f"爱听通知任务获得{res['data']['score']}积分", notify=True)
+        other_tasks = [t for t in todo_list if "通知" not in t.get("taskName", "") and "阅读" not in t.get("taskName", "") and "听读" not in t.get("taskName", "") and "邀请" not in t.get("taskName", "") and "签到" not in t.get("taskName", "")]
+        for task in other_tasks:
+            remaining = (task.get("needCount", 1) or 1) - (task.get("finishCount", 0) or 0)
+            if remaining <= 0: continue
+            self.logger.log(f"爱听执行通用任务: {task.get('taskName')} (剩余{remaining}次)")
+            for i in range(remaining):
+                await self.jf_to_finish(ticket, task.get("taskCode"))
+                await asyncio.sleep(2)
+                await self.aiting_complete_task_api(4)
+                if (res := await self.jf_pop_up(ticket)) and res.get("data", {}).get("score"):
+                    self.logger.log(f"爱听通用任务获得{res['data']['score']}积分", notify=True)
+                await asyncio.sleep(1.5)
+
+    async def aiting_task(self):
+        if not await self.aiting_login_flow(): return self.logger.log("爱听: 登录失败，跳过任务")
+        self.aiting_biz_ticket = await self.aiting_get_ticket()
+        if not self.aiting_biz_ticket: return self.logger.log("爱听: 获取Ticket失败")
+        await self.aiting_sign_in()
+        await self.aiting_do_tasks(self.aiting_biz_ticket)
+        await self.jf_get_user_info(self.aiting_biz_ticket)
+
     async def user_task(self):
         if not await self.online(): return
-        for task in [self.sign_task, self.ttlxj_task, self.ltzf_task, self.market_task, self.wostore_cloud_task, self.security_butler_task, self.shangdu_task, self.woread_task]: await task()
+        for task in [self.sign_task, self.ttlxj_task, self.ltzf_task, self.market_task, self.wostore_cloud_task, self.security_butler_task, self.shangdu_task, self.woread_task, self.aiting_task]: await task()
 
 async def main():
     start_time = datetime.now()
