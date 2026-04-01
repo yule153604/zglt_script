@@ -46,11 +46,7 @@ MARKET_PRIVILEGE_MAX_RETRIES = 4
 USER_AGENT = lambda v: f"Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{{version:{v}}}"
 APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922869a8d2313b6f2f9f3b57f2901f0021c4575e4b6949ae18b7f6761d465c12321788dcd980aa1a641789d1188bb"
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
-WOREAD_PRODUCT_ID, WOREAD_SECRET_KEY, WOREAD_PASSWORD, WOREAD_IV = "10000002", "7k1HcDL8RKvc", "woreadst^&*12345", "16-Bytes--String"
 WOCARE_CHANNEL_ID, WOCARE_SIGN_KEY, WOCARE_CHANNEL_TYPE, WOCARE_VERSION = "beea1c7edf7c4989b2d3621c4255132f", "f4cd4ffeb5554586acf65ba7110534f5", "wocareMBHServiceLife1", "1"
-AITING_BASE_URL, AITING_SIGN_KEY_APPKEY, AITING_SIGN_KEY_API = "https://pcc.woread.com.cn", "7ZxQ9rT3wE5sB2dF", "woread!@#qwe1234"
-AITING_SIGN_KEY_REQUERTID, AITING_CLIENT_KEY, AITING_AES_KEY, AITING_AES_IV = "46iCw24ewAZbNkK6", "1", "j2K81755sxV12wFx", "16-Bytes--String"
-ADDREADTIME_AES_KEY = "UNS#READDAY39COM"
 EXCHANGE_COUPON_CONFIG = {"1元话费券": False, "3元话费券": False, "5元话费券": False, "10元话费券": False, "18元话费券": False}
 COUPON_PRODUCT_MAP = {k: v for k, v in zip(EXCHANGE_COUPON_CONFIG.keys(), ["25122309441216995", "25122309482612026", "25122309512816188", "25122309543215732", "25122310293512803"])}
 COUPON_POINTS_REQUIRED = {k: int(k.split("元")[0]) * 100 for k in EXCHANGE_COUPON_CONFIG}
@@ -159,6 +155,10 @@ class CustomUserService:
         for name, val in [("TOKENID_COOKIE", self.token_id_cookie), ("UNICOM_TOKENID", self.unicom_token_id), ("sdkuuid", self.sdkuuid)]:
             self.http.cookies.set(name, val, domain=".10010.com")
         self.rpt_id = self.market_token = self.market_login_id = self.market_rn_str = self.xj_token = self.wocare_token = self.wocare_sid = self.ecs_token = ""
+        self.session_id = self.token_id = ""
+        self.xj_comm_high_flag = ""
+        self.sec_old_points = None
+        self.sec_ticket1 = self.sec_token = self.sec_ticket = self.sec_jea_id = self.sec_secret_key = ""
         self.initial_telephone_amount = 0.0
 
     get_bizchannelinfo = lambda self: json.dumps({"bizChannelCode": "225", "disriBiz": "party", "unionSessionId": "", "stType": "", "stDesmobile": "", "source": "", "rptId": self.rpt_id, "ticket": "", "tongdunTokenId": self.token_id_cookie, "xindunTokenId": self.sdkuuid})
@@ -552,25 +552,32 @@ class CustomUserService:
             return bool(result and result.get("code") == 200), result
         except: return False, None
 
+    def _get_xj_month_activity_id(self):
+        month_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        now = datetime.now()
+        return f"{month_abbr[now.month - 1]}{now.year}Act"
+
     async def xj_task(self):
         if "新疆" not in self.province: return
         if not (ticket_info := await self.open_plat_line_new("https://zy100.xj169.com/touchpoint/openapi/jumpHandRoom1G?source=155&type=02"))["ticket"]: return
         if await self.xj_get_token(ticket_info["ticket"]):
+            month_activity_id = self._get_xj_month_activity_id()
             await self.xj_common_high_rest()
-            await self.xj_do_draw("Mar2026Act")
-            #await self.xj_do_draw("dakaMar2026Act", "daka_tclxjkhyjst")
-            #await self.xj_do_draw("dakaMar2026Act", "daka_sftczxqb_teenty")
+            await self.xj_do_draw(month_activity_id)
+            await self.xj_do_draw(f"daka{month_activity_id}", "daka_sftczxqb_twenty")
 
     @async_task_silent
     async def xj_common_high_rest(self):
-        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/themeAct/commonHightRest", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"activityId": "Mar2026Act"})
+        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/themeAct/commonHightRest", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"activityId": self._get_xj_month_activity_id()})
         if (result := res["result"]) and result.get("code") in [0, "SUCCESS"]: self.xj_comm_high_flag = result.get("data", "")
         else: self.xj_comm_high_flag = ""
 
     @async_task("新疆联通抽奖")
-    async def xj_do_draw(self, activity_id="Mar2026Act", prize_id=""):
-        prize_dict = {"5Gksjhjhyyk": "5G宽视界黄金会员-月卡", "hfq_five": "5元话费券(50-5)", "hfq_ten": "10元话费券(100-10)", "aqyhjVIPhyyk": "爱奇艺黄金VIP会员-月卡", "aqyxzVIPhynk": "爱奇艺星钻VIP会员-年卡", "ddkc30ydjq": "滴滴快车30元代金券", "ddkc5ydjq": "滴滴快车5元代金券", "mgTVhyyk": "芒果TV会员-月卡", "bilibilidhyyk": "哔哩哔哩大会员-月卡", "WPScjhyyk": "WPS超级会员-月卡", "mxbcncqb12y": "蜜雪冰城奶茶券包12元", "spcllxhyyk": "视频彩铃乐享会员-月卡", "mspcllxhyyk": "视频彩铃乐享月卡", "daka_sftczxqb_teenty": "顺丰同城20尊享券包", "daka_tclxjkhyjst": "同程旅行金卡会员九十天"}
-        res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/themeAct/draw_Mar2026Act", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest"}, data={"activityId": activity_id, "prizeId": prize_id, "commHighFlag": getattr(self, "xj_comm_high_flag", "")})
+    async def xj_do_draw(self, activity_id="", prize_id=""):
+        month_activity_id = self._get_xj_month_activity_id()
+        if not activity_id: activity_id = month_activity_id
+        prize_dict = {"5Gksjhjhyyk": "5G宽视界黄金会员-月卡", "hfq_five": "5元话费券(50-5)", "hfq_ten": "10元话费券(100-10)", "aqyhjVIPhyyk": "爱奇艺黄金VIP会员-月卡", "aqyxzVIPhynk": "爱奇艺星钻VIP会员-年卡", "ddkc30ydjq": "滴滴快车30元代金券", "ddkc5ydjq": "滴滴快车5元代金券", "mgTVhyyk": "芒果TV会员-月卡", "bilibilidhyyk": "哔哩哔哩大会员-月卡", "WPScjhyyk": "WPS超级会员-月卡", "mxbcncqb12y": "蜜雪冰城奶茶券包12元", "spcllxhyyk": "视频彩铃乐享会员-月卡", "mspcllxhyyk": "视频彩铃乐享月卡", "daka_sftczxqb_twenty": "顺丰同城20尊享券包", "daka_tclxjkhyjst": "同程旅行金卡会员九十天"}
+        res = await self.http.post(f"https://zy100.xj169.com/touchpoint/openapi/themeAct/draw_{month_activity_id}", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/x-www-form-urlencoded;charset=utf-8"}, data={"activityId": activity_id, "prizeId": prize_id, "commHighFlag": getattr(self, "xj_comm_high_flag", "")})
         msg, data = (result := res["result"]).get("msg"), result.get("data")
         if msg == "thanks1": self.logger.log(f"新疆联通[{activity_id}]: {data}")
         elif msg in prize_dict: self.logger.log(f"新疆联通[{activity_id}]抽奖结果: {prize_dict[msg]}", notify=True)
@@ -604,50 +611,6 @@ class CustomUserService:
         res = await self.http.post("https://zy100.xj169.com/touchpoint/openapi/marchAct/draw_UsersDay2025Act", headers={"userToken": self.xj_token, "X-Requested-With": "XMLHttpRequest"}, data={"activityId": "usersDay2026Act", "prizeId": prize_id})
         if (result := res["result"]) and result.get("code") in [0, "SUCCESS"]: self.logger.log(f"客户日秒杀成功: {prize_dict.get(prize_id, prize_id)}", notify=True)
         else: self.logger.log(f"客户日秒杀失败: {result.get('data') or result.get('msg')}")
-
-    @async_task("云手机")
-    async def wostore_cloud_task(self):
-        if not (ticket_info := await self.open_plat_line_new("https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id=ST-Zujian001-gs&cp_id=91002997"))["ticket"]: return
-        if not (tokens := await self.wostore_cloud_login(ticket_info["ticket"])): return
-        first_token, user_token = tokens
-        await self.wostore_cloud_sign(user_token)
-        await asyncio.sleep(1)
-        await self.wostore_cloud_task_list(user_token)
-        await asyncio.sleep(1)
-        await self.wostore_cloud_get_chance(user_token, "2508-01")
-        await asyncio.sleep(1)
-        await self.wostore_cloud_draw(user_token)
-
-    @async_task_silent
-    async def wostore_cloud_login(self, ticket):
-        res = await self.http.post("https://member.zlhz.wostore.cn/wcy_member/yunPhone/h5Awake/businessHall", json={"cpId": "91002997", "channelId": "ST-Zujian001-gs", "ticket": ticket, "env": "prod", "transId": "S2ndpage1235+开福袋！+F1+CJDD00D0001+iphone_c@12.0801", "qkActId": None}, headers={"Host": "member.zlhz.wostore.cn", "Origin": "https://h5forphone.wostore.cn", "Referer": f"https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id=ST-Zujian001-gs&ticket={ticket}"})
-        if not ((result := res["result"]) and result.get("code") == "0"): return None
-        redirect_url = result.get("data", {}).get("url", "")
-        if "token=" not in redirect_url: return None
-        first_token = redirect_url.split("token=")[1].split("&")[0]
-        await asyncio.sleep(1)
-        res2 = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/login", json={"identityType": "cloudPhoneLogin", "code": first_token, "channelId": "ST-Zujian001-gs", "activityId": "Lottery_251201", "device": "device"}, headers={"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": f"https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs&token={first_token}", "X-USR-TOKEN": first_token})
-        if (result2 := res2["result"]) and result2.get("code") == 200: return (first_token, result2.get("data", {}).get("user_token"))
-        return None
-
-    @async_task("云手机积分签到")
-    async def wostore_cloud_sign(self, user_token):
-        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/points/v1/sign", json={"activityCode": "Points_Sign_2507"}, headers={"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": "https://uphone.wostore.cn/h5/lt/points", "X-USR-TOKEN": user_token})
-        if (result := res["result"]) and result.get("code") == 200: self.logger.log(f"云手机积分签到: {result.get('msg', '成功')}")
-
-    @async_task_silent
-    async def wostore_cloud_task_list(self, user_token):
-        await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/task/list", json={"activityCode": "Lottery_251201"}, headers={"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": "https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs", "X-USR-TOKEN": user_token})
-
-    @async_task_silent
-    async def wostore_cloud_get_chance(self, user_token, task_code):
-        await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/task/raffle/get", json={"activityCode": "Lottery_251201", "taskCode": task_code}, headers={"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": "https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs", "X-USR-TOKEN": user_token})
-
-    @async_task("云手机抽奖")
-    async def wostore_cloud_draw(self, user_token):
-        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/lottery", json={"activityCode": "Lottery_251201"}, headers={"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": "https://uphone.wostore.cn/h5/lt/December?ch=ST-Zujian001-gs", "X-USR-TOKEN": user_token})
-        if (result := res["result"]) and result.get("code") == 200: self.logger.log(f"云手机抽奖: {result.get('prizeName', '未中奖')}", notify=True)
-        elif result: self.logger.log(f"云手机抽奖失败: {result.get('msg') or result.get('message') or result.get('data') or result}")
 
     @async_task("签到区-任务中心")
     async def sign_task_center(self):
@@ -732,9 +695,10 @@ class CustomUserService:
 
     @async_task("安全管家获取动态验签密鑰")
     async def _sec_get_secret_key(self):
-        t = unquote(self.sec_ticket) if getattr(self, 'sec_ticket', None) else ""
+        sec_ticket = self.sec_ticket or ""
+        t = unquote(sec_ticket) if sec_ticket else ""
         headers = {"ticket": t, "partnersid": "1702", "clienttype": "uasp_unicom_applet", "Accept": "application/json, text/plain, */*", "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15", "pageId": "s768590754920323072"}
-        if getattr(self, 'sec_jea_id', None): headers["Cookie"] = f"_jea_id={self.sec_jea_id}"
+        if self.sec_jea_id: headers["Cookie"] = f"_jea_id={self.sec_jea_id}"
         res = await self.http.get("https://m.jf.10010.com/jf-external-application/jftask/getSecretKey", headers=headers)
         sc = res.get("headers", {}).get("set-cookie") or res.get("headers", {}).get("Set-Cookie")
         if sc:
@@ -919,347 +883,17 @@ class CustomUserService:
             elif code == "0019": self.logger.log("商都福利: 重试仍返回重复签到，请检查")
             else: self.logger.log(f"商都福利签到重试失败: {result.get('msg') or result.get('desc') or ''}")
 
-    def _woread_encode(self, data, password=WOREAD_PASSWORD):
-        try:
-            text = (json.dumps(data, separators=(",", ":")) if isinstance(data, (dict, list)) else str(data))
-            cipher = AES.new(password.encode("utf-8"), AES.MODE_CBC, WOREAD_IV.encode("utf-8"))
-            return base64.b64encode(cipher.encrypt(pad(text.encode("utf-8"), AES.block_size)).hex().encode("utf-8")).decode("utf-8")
-        except Exception as e: self.logger.log(f"联通阅读加密异常: {e}"); return ""
-
-    async def woread_auth(self):
-        try:
-            timestamp = str(int(datetime.now().timestamp() * 1000))
-            md5_hash = hashlib.md5(f"{WOREAD_PRODUCT_ID}{WOREAD_SECRET_KEY}{timestamp}".encode("utf-8")).hexdigest()
-            res = await self.http.post(f"https://10010.woread.com.cn/ng_woread_service/rest/app/auth/{WOREAD_PRODUCT_ID}/{timestamp}/{md5_hash}", headers={"Content-Type": "application/json", "User-Agent": "okhttp/3.14.9"}, json={"sign": self._woread_encode({"timestamp": datetime.now().strftime("%Y%m%d%H%M%S")})})
-            if (result := res["result"]) and str(result.get("code")) == "0000":
-                self.woread_accesstoken = result.get("data", {}).get("accesstoken", "")
-                return True
-            self.logger.log(f"联通阅读预登录失败: {result.get('message', '') if result else '请求失败'}")
-            return False
-        except Exception as e: self.logger.log(f"联通阅读预登录异常: {e}"); return False
-
-    async def woread_login(self):
-        try:
-            if not await self.woread_auth(): return False
-            if not getattr(self, "token_online", None): self.logger.log("联通阅读: 缺少 token_online"); return False
-            inner_json = json.dumps({"tokenOnline": self._woread_encode_str(self.token_online), "phone": self._woread_encode_str(self.mobile), "timestamp": datetime.now().strftime("%Y%m%d%H%M%S")}, separators=(",", ":"))
-            res = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/account/login", headers={"accesstoken": self.woread_accesstoken, "Content-Type": "application/json", "User-Agent": "okhttp/3.14.9"}, json={"sign": self._woread_encode_str(inner_json)})
-            if (result := res["result"]) and str(result.get("code")) == "0000":
-                data = result.get("data", {})
-                self.woread_token, self.woread_verifycode, self.woread_userid, self.woread_userindex = data.get("token", ""), data.get("verifycode", ""), data.get("userid", ""), data.get("userindex", "")
-                self.logger.log("联通阅读: 登录成功")
-                return True
-            self.logger.log(f"联通阅读登录失败: {result.get('msg', '') or result.get('message', '') if result else '请求失败'}")
-            return False
-        except Exception as e: self.logger.log(f"联通阅读登录异常: {e}"); return False
-
-    def _woread_encode_str(self, text):
-        try:
-            cipher = AES.new(WOREAD_PASSWORD.encode("utf-8"), AES.MODE_CBC, WOREAD_IV.encode("utf-8"))
-            return base64.b64encode(cipher.encrypt(pad(text.encode("utf-8"), AES.block_size)).hex().encode("utf-8")).decode("utf-8")
-        except Exception as e: self.logger.log(f"联通阅读加密异常: {e}"); return ""
-
-    async def woread_get_book_info(self):
-        wr_headers = {"accesstoken": self.woread_accesstoken, "User-Agent": "okhttp/3.14.9"}
-        try:
-            res = await self.http.get("https://10010.woread.com.cn/ng_woread_service/rest/basics/recommposdetail/14856", headers=wr_headers)
-            if not (result := res["result"]) or str(result.get("code")) != "0000": self.logger.log("联通阅读: 获取书籍列表失败"); return False
-            data = result.get("data", {})
-            booklist, bindinfo = data.get("booklist", {}).get("message", []), data.get("bindinfo", [])
-            if not booklist or not bindinfo: self.logger.log("联通阅读: 获取书籍列表为空"); return False
-            self.wr_catid, self.wr_cardid, self.wr_cntindex = booklist[0].get("catindex", ""), bindinfo[0].get("recommposiindex", ""), booklist[0].get("cntindex", "")
-            if not self.wr_cntindex: return False
-            res2 = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/cnt/chalist", headers={**wr_headers, "Content-Type": "application/json"}, json={"sign": self._woread_encode({"curPage": 1, "limit": 30, "index": self.wr_cntindex, "sort": 0, "finishFlag": 1, **self._get_woread_param()})})
-            if (chapters := (res2["result"] or {}).get("list", [])) and (chapter_content := chapters[0].get("charptercontent", [])):
-                self.wr_chapterallindex, self.wr_chapterid = chapter_content[0].get("chapterallindex", ""), chapter_content[0].get("chapterid", "")
-                return True
-            return False
-        except Exception as e: self.logger.log(f"联通阅读获取书籍异常: {e}"); return False
-
-    _get_woread_param = lambda self: {"timestamp": datetime.now().strftime("%Y%m%d%H%M%S"), "token": getattr(self, "woread_token", ""), "userid": getattr(self, "woread_userid", ""), "userId": getattr(self, "woread_userid", ""), "userIndex": int(getattr(self, "woread_userindex", 0) or 0), "userAccount": self.mobile, "verifyCode": getattr(self, "woread_verifycode", "")}
-
-    @async_task("联通阅读模拟阅读")
-    async def woread_read_process(self):
-        if not await self.woread_get_book_info(): return self.logger.log("联通阅读: 无法获取书籍信息，跳过阅读")
-        wr_headers = {"accesstoken": self.woread_accesstoken, "Content-Type": "application/json", "User-Agent": "okhttp/3.14.9"}
-        await self.http.post(f"https://10010.woread.com.cn/ng_woread_service/rest/cnt/wordsDetail?catid={self.wr_catid}&cardid={self.wr_cardid}&cntindex={self.wr_cntindex}&chapterallindex={self.wr_chapterallindex}&chapterseno=1", headers=wr_headers, json={"sign": self._woread_encode({"chapterAllIndex": self.wr_chapterallindex, "cntIndex": self.wr_cntindex, "cntTypeFlag": "1", **self._get_woread_param()})})
-        await asyncio.sleep(1)
-        add_param = {"readTime": "2", "cntIndex": self.wr_cntindex, "cntType": "1", "catid": "0", "pageIndex": "", "cardid": self.wr_cardid, "cntindex": self.wr_cntindex, "cnttype": "1", "chapterallindex": self.wr_chapterallindex, "chapterseno": "1", "channelid": "", "chapterid": self.wr_chapterid, "readtype": 1, "isend": "0", **self._get_woread_param()}
-        res = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/history/addReadTime", headers=wr_headers, json={"sign": self._woread_encode(add_param)})
-        self.logger.log("联通阅读: 模拟阅读成功" if (result := res["result"]) and str(result.get("code")) == "0000" else f"联通阅读: 模拟阅读失败: {result.get('msg', '') if result else ''}")
-
-    @async_task("联通阅读抽奖")
-    async def woread_draw_new(self):
-        wr_headers = {"accesstoken": self.woread_accesstoken, "Content-Type": "application/json", "User-Agent": "okhttp/3.14.9"}
-        res = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/basics/doDraw", headers=wr_headers, json={"sign": self._woread_encode({"activeindex": "8051", **self._get_woread_param()})})
-        if (result := res["result"]) and str(result.get("code")) == "0000":
-            self.logger.log(f"联通阅读抽奖: {result.get('data', {}).get('prizedesc', '未知奖品')}", notify=True)
-        else:
-            msg = (result.get("msg", "") or result.get("message", "")) if result else "请求失败"
-            self.logger.log(f"联通阅读: {msg}" if "已抽" in msg or "次数" in msg else f"联通阅读抽奖失败: {msg}")
-
-    @async_task_silent
-    async def woread_queryTicketAccount(self):
-        wr_headers = {"accesstoken": self.woread_accesstoken, "Content-Type": "application/json", "User-Agent": "okhttp/3.14.9"}
-        res = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/phone/vouchers/queryTicketAccount", headers=wr_headers, json={"sign": self._woread_encode(self._get_woread_param())})
-        if (result := res["result"]) and str(result.get("code")) == "0000":
-            self.logger.log(f"联通阅读话费红包余额: {float(result.get('data', {}).get('usableNum', 0)) / 100:.2f}元", notify=True)
-
-    async def woread_task(self):
-        if not await self.woread_login(): return self.logger.log("联通阅读: 登录失败，跳过任务")
-        await self.woread_read_process()
-        await self.woread_draw_new()
-        await self.woread_queryTicketAccount()
-
-    # ==================== 联通爱听专区 ====================
-    def generate_random_imei(self):
-        tac = "".join(str(random.randint(0, 9)) for _ in range(8))
-        snr = "".join(str(random.randint(0, 9)) for _ in range(6))
-        imei_base = tac + snr
-        digits = [int(d) for d in imei_base]
-        for i in range(len(digits) - 1, -1, -2):
-            digits[i] *= 2
-            if digits[i] > 9: digits[i] -= 9
-        check_digit = (10 - sum(digits) % 10) % 10
-        return imei_base + str(check_digit)
-
-    def aiting_get_aes(self, data, key):
-        text = json.dumps(data, separators=(",", ":")) if isinstance(data, (dict, list)) else str(data)
-        cipher = AES.new(key[:16].encode(), AES.MODE_CBC, AITING_AES_IV.encode())
-        return base64.b64encode(cipher.encrypt(pad(text.encode(), AES.block_size)).hex().encode()).decode()
-
-    def aiting_aes_encrypt(self, data, key, iv):
-        text = json.dumps(data, separators=(",", ":")) if isinstance(data, (dict, list)) else str(data)
-        cipher = AES.new(key.encode(), AES.MODE_CBC, iv.encode())
-        return base64.b64encode(cipher.encrypt(pad(text.encode(), AES.block_size)).hex().upper().encode()).decode()
-
-    aiting_generate_sign = lambda self, params, key: hashlib.md5(f"{'&'.join(f'{k}={params[k]}' for k in sorted(params))}&key={key}".encode()).hexdigest()
-    aiting_generate_woid = lambda self, imei: f"WOA{self.random_string(6)}{imei[:8] if len(imei) >= 8 else imei.ljust(8, '0')}LOT{self.random_string(4)}LV{self.random_string(2)}"
-    aiting_calculate_clientconfirm = lambda self, userid, imei: self.aiting_aes_encrypt(f"android{userid}{imei}", AITING_AES_KEY, AITING_AES_IV)
-    aiting_calculate_passcode = lambda self, timestamp, phone: hashlib.md5(f"{timestamp}{phone}{AITING_CLIENT_KEY}".encode()).hexdigest()
-    aiting_build_statisticsinfo = lambda self, userid, useraccount, imei, clientconfirm: "&".join(f"{k}={v}" for k, v in {"channelid": "28015001", "sid": self.random_string(20), "eid": self.random_string(20), "osversion": "Android12", "clientallid": "000000100000000000058.0.2.1225", "display": "2400_1080", "ip": "192.168.3.24", "nettypename": "wifi", "version": "802", "versionname": "8.0.2", "terminalName": "Redmi", "terminalType": "Redmi_K30_Pro", "udid": "null", "woid": self.aiting_generate_woid(imei), "useraccount": useraccount, "userid": userid, "clientconfirm": clientconfirm}.items())
-
-    def _aiting_requertid(self, timestamp=None, nonce=None):
-        ts = timestamp or str(int(time.time() * 1000))
-        nc = nonce or str(random.randint(100000, 999999))
-        sign_params = {"jwt": self.aiting_jwt, "nonestr": nc, "osversion": "Android12", "terminalName": "Redmi", "timestamp": ts}
-        return ts, nc, hashlib.md5(f"{'&'.join(f'{k}={sign_params[k]}' for k in sorted(sign_params))}&key={AITING_SIGN_KEY_REQUERTID}".encode()).hexdigest()
-
-    def _aiting_headers(self, ts, nonce, requertid):
-        return {"AuthorizationClient": f"Bearer {self.aiting_jwt}", "requerttime": ts, "nonestr": nonce, "requertid": requertid, "statisticsinfo": self.aiting_statisticsinfo, "User-Agent": "okhttp/4.9.0"}
-
-    @async_task("爱听获取JWT")
-    async def aiting_get_jwt_token(self, statisticsinfo):
-        timestamp = str(int(time.time() * 1000))
-        sign_params = {"clientSource": "3", "clientId": "android", "source": "3", "timestamp": timestamp}
-        sign = self.aiting_generate_sign(sign_params, AITING_SIGN_KEY_APPKEY)
-        client_id_b64 = base64.b64encode("395DEDE9C1D6FE11B7C9C0D82B353E74".encode()).decode()
-        res = await self.http.post(f"{AITING_BASE_URL}/oauth/client/appkey", headers={"Skip-Authorization-Check": "true", "statisticsinfo": statisticsinfo, "Content-Type": "application/json"}, json={"clientSource": "3", "clientId": client_id_b64, "source": "3", "timestamp": timestamp, "sign": sign})
-        return result.get("key") if (result := res["result"]) and result.get("code") == "0000" else None
-
-    @async_task("爱听获取Profile")
-    async def aiting_get_read_profile(self, user_token, userid, jwt_token, statisticsinfo):
-        req_time, nonce = str(int(time.time() * 1000)), str(random.randint(100000, 999999))
-        sign_params = {"jwt": jwt_token, "nonestr": nonce, "osversion": "Android12", "terminalName": "Redmi", "timestamp": req_time}
-        requertid = hashlib.md5(f"{'&'.join(f'{k}={sign_params[k]}' for k in sorted(sign_params))}&key={AITING_SIGN_KEY_REQUERTID}".encode()).hexdigest()
-        res = await self.http.get(f"{AITING_BASE_URL}/pcc/rest/sns/profile/readprofile/7", params={"userid": userid, "token": user_token, "encryptflag": "1"}, headers={"User-Agent": "okhttp/4.9.0", "requerttime": req_time, "nonestr": nonce, "requertid": requertid, "AuthorizationClient": f"Bearer {jwt_token}", "statisticsinfo": statisticsinfo})
-        return result.get("message") if (result := res["result"]) and result.get("code") == "0000" else None
-
-    @async_task("爱听业务登录")
-    async def aiting_api_login(self, phone, useraccount, jwt_token, statisticsinfo):
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        passcode = self.aiting_calculate_passcode(timestamp, phone)
-        url = f"{AITING_BASE_URL}/mainrest/rest/read/user/ulogin//3/{useraccount}/1/1/0?networktype=3&ua=Redmi+K30+Pro&isencode=true&clientversion=8.0.2&versionname=Android_1_1080x2356&channelid=28015001&userlabelisencode=1&validatecode=&sid=&timestamp={timestamp}&passcode={passcode}"
-        req_time, nonce = str(int(time.time() * 1000)), str(random.randint(100000, 999999))
-        sign_params = {"jwt": jwt_token, "nonestr": nonce, "osversion": "Android12", "terminalName": "Redmi", "timestamp": req_time}
-        requertid = hashlib.md5(f"{'&'.join(f'{k}={sign_params[k]}' for k in sorted(sign_params))}&key={AITING_SIGN_KEY_REQUERTID}".encode()).hexdigest()
-        res = await self.http.get(url, headers={"statisticsinfo": statisticsinfo, "requerttime": req_time, "nonestr": nonce, "requertid": requertid, "AuthorizationClient": f"Bearer {jwt_token}", "User-Agent": "okhttp/4.9.0"})
-        if (result := res["result"]) and result.get("code") == "0000" and (msg := result.get("message")):
-            token = msg.get("accountinfo", {}).get("token") or msg.get("token")
-            return {"token": token, "userid": msg.get("accountinfo", {}).get("userid") or msg.get("userid")} if token else None
-        return None
-
-    @async_task("爱听登录流程")
-    async def aiting_login_flow(self):
-        if not (self.woread_token and self.woread_userid): return self.logger.log("爱听: 需要先完成联通阅读登录") or False
-        self.aiting_woread_token, self.aiting_base_userid = self.woread_token, self.woread_userid
-        phone, imei = self.mobile, self.generate_random_imei()
-        clientconfirm = self.aiting_calculate_clientconfirm(self.aiting_base_userid, imei)
-        temp_stats = self.aiting_build_statisticsinfo(self.aiting_base_userid, phone, imei, clientconfirm)
-        self.aiting_jwt = await self.aiting_get_jwt_token(temp_stats)
-        if not self.aiting_jwt: return False
-        profile_msg = await self.aiting_get_read_profile(self.aiting_woread_token, self.aiting_base_userid, self.aiting_jwt, temp_stats)
-        if not profile_msg or not profile_msg.get("mobile"): return False
-        real_useraccount = profile_msg["mobile"]
-        self.aiting_statisticsinfo = self.aiting_build_statisticsinfo(self.aiting_base_userid, real_useraccount, imei, clientconfirm)
-        login_data = await self.aiting_api_login(phone, real_useraccount, self.aiting_jwt, self.aiting_statisticsinfo)
-        if not login_data: return False
-        self.aiting_token, self.aiting_userid = login_data["token"], login_data["userid"]
-        return True
-
-    @async_task("爱听获取Ticket")
-    async def aiting_get_ticket(self):
-        ts, nonce, requertid = self._aiting_requertid()
-        sign = self.aiting_generate_sign({"timestamp": ts, "token": self.aiting_token, "userid": self.aiting_userid}, AITING_SIGN_KEY_API)
-        res = await self.http.post(f"{AITING_BASE_URL}/activity/rest/unicom/points/getInfoTicket", headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"}, json={"sign": sign, "timestamp": ts, "token": self.aiting_token, "userid": self.aiting_userid})
-        if (result := res["result"]) and result.get("code") == "0000" and (msg := result.get("message")) and "ticket=" in msg:
-            return parse_qs(urlparse(msg).query).get("ticket", [""])[0]
-        return None
-
-    @async_task("爱听签到")
-    async def aiting_sign_in(self):
-        ts, nonce, requertid = self._aiting_requertid()
-        res = await self.http.get(f"https://woread.com.cn/rest/read/usersign/sign/3/{self.aiting_base_userid}/{self.aiting_woread_token}", params={"isresign": "0", "isnewversion": "1", "isfreeLimt": "0"}, headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"})
-        if (result := res["result"]) and result.get("code") == "0000":
-            self.logger.log(f"爱听签到成功: {result.get('desc', '')} (连续{result.get('continuousDays', 0)}天)", notify=True)
-        else: self.logger.log(f"爱听签到: {result.get('desc') or result.get('message') or '失败'}")
-
-    def get_jf_headers(self, ticket):
-        base = {"ticket": ticket, "pageid": "s789081246969976832", "clienttype": "aiting_android", "partnersid": "1706", "content-type": "application/json;charset=UTF-8", "User-Agent": "Mozilla/5.0 (Linux; Android 12; Redmi K30 Pro) AppleWebKit/537.36 WoReaderApp/Android", "Origin": "https://m.jf.10010.com", "Referer": f"https://m.jf.10010.com/jf-external-application/index.html?ticket={ticket}&pageID=s789081246969976832"}
-        sk = getattr(self, 'aiting_secret_key', None)
-        if sk:
-            ts = str(int(time.time() * 1000))
-            nonce = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-            sig = hmac.new(sk.encode('utf-8'), f"{nonce}{ts}".encode('utf-8'), hashlib.sha256).hexdigest()
-            base.update({"X-Request-Timestamp": ts, "X-Request-Nonce": nonce, "X-Request-Signature": sig})
-        return base
-
-    @async_task("爱听查询积分")
-    async def jf_get_user_info(self, ticket):
-        res = await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/userInfo", headers=self.get_jf_headers(ticket), json={})
-        if (result := res["result"]) and result.get("code") == "0000" and (data := result.get("data")):
-            self.logger.log(f"爱听积分: 今日已赚{data.get('todayEarnScore', 0)}, 余额{data.get('availableScore', 0)}", notify=True)
-            return data
-        return None
-
-    @async_task_silent
-    async def jf_get_task_detail(self, ticket):
-        res = await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/taskDetail", headers=self.get_jf_headers(ticket), json={})
-        return result["data"]["taskDetail"].get("taskList", []) if (result := res["result"]) and result.get("data", {}).get("taskDetail") else []
-
-    @async_task_silent
-    async def jf_to_finish(self, ticket, task_code):
-        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/toFinish", headers=self.get_jf_headers(ticket), json={"taskCode": task_code})
-        await self.jf_task_finish(ticket, task_code)
-
-    @async_task_silent
-    async def jf_task_finish(self, ticket, task_code):
-        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/taskFinish", headers=self.get_jf_headers(ticket), json={"taskCode": task_code})
-
-    @async_task_silent
-    async def jf_pop_up(self, ticket):
-        return (await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/popUp", headers=self.get_jf_headers(ticket), json={}))["result"]
-
-    @async_task_silent
-    async def aiting_complete_task_api(self, task_type):
-        ts, nonce, requertid = self._aiting_requertid()
-        body = {"source": "3", "timestamp": ts, "token": self.aiting_woread_token, "type": str(task_type), "userid": self.aiting_base_userid}
-        body["sign"] = self.aiting_generate_sign(body, AITING_SIGN_KEY_API)
-        await self.http.post(f"{AITING_BASE_URL}/activity/rest/unicom/points/completiontask", headers={**self._aiting_headers(ts, nonce, requertid), "Content-Type": "application/json"}, json=body)
-
-    @async_task("爱听执行任务")
-    async def aiting_do_tasks(self, ticket):
-        task_list = await self.jf_get_task_detail(ticket)
-        if not task_list: return
-        todo_list = [t for t in task_list if t.get("finish") == 0 and "邀请" not in t.get("taskName", "") and "阅读" not in t.get("taskName", "") and "听读" not in t.get("taskName", "") and "签到" not in t.get("taskName", "")]
-        # 处理听读/阅读任务
-        read_task = next((t for t in task_list if t.get("finish") == 0 and ("听读" in t.get("taskName", ""))), None)
-        if read_task: await self.aiting_read_task(ticket)
-        if not todo_list: return self.logger.log("爱听任务: 所有任务已完成")
-        notify_task = next((t for t in todo_list if "通知" in t.get("taskName", "")), None)
-        if notify_task:
-            await self.jf_to_finish(ticket, notify_task.get("taskCode"))
-            await asyncio.sleep(1)
-            await self.aiting_complete_task_api(2)
-            await asyncio.sleep(2)
-            if (res := await self.jf_pop_up(ticket)) and res.get("data", {}).get("score"):
-                self.logger.log(f"爱听通知任务获得{res['data']['score']}积分", notify=True)
-        other_tasks = [t for t in todo_list if "通知" not in t.get("taskName", "") and "阅读" not in t.get("taskName", "") and "听读" not in t.get("taskName", "") and "邀请" not in t.get("taskName", "") and "签到" not in t.get("taskName", "")]
-        for task in other_tasks:
-            remaining = (task.get("needCount", 1) or 1) - (task.get("finishCount", 0) or 0)
-            if remaining <= 0: continue
-            self.logger.log(f"爱听执行通用任务: {task.get('taskName')} (剩余{remaining}次)")
-            for i in range(remaining):
-                await self.jf_to_finish(ticket, task.get("taskCode"))
-                await asyncio.sleep(2)
-                await self.aiting_complete_task_api(4)
-                if (res := await self.jf_pop_up(ticket)) and res.get("data", {}).get("score"):
-                    self.logger.log(f"爱听通用任务获得{res['data']['score']}积分", notify=True)
-                await asyncio.sleep(1.5)
-        # 爱听领奖步骤
-        for task in task_list:
-            if task.get("finish") == 1 and task.get("finishText") == "待领取":
-                await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/receive", headers=self.get_jf_headers(ticket), json={"taskCode": task.get("taskCode")})
-                await asyncio.sleep(1)
-
-    @async_task("爱听阅读计时任务")
-    async def aiting_read_task(self, ticket):
-        if not getattr(self, 'woread_accesstoken', None) or not getattr(self, 'wr_cntindex', None):
-            return self.logger.log("爱听阅读: 缺少书籍信息，已跳过")
-        wr_headers = {"accesstoken": self.woread_accesstoken, "Content-Type": "application/json;charset=utf-8", "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15"}
-        # 第一步: 激活积分平台任务
-        read_jf_headers = {**self.get_jf_headers(ticket), "clienttype": "aiting_unicom", "pageid": "s789081278936864768", "Referer": f"https://m.jf.10010.com/ts-mobile/well/s789081278936864768?partnersId=1706&clientType=aiting_unicom&ticket={ticket}"}
-        if getattr(self, 'aiting_secret_key', None):
-            ts = str(int(time.time() * 1000))
-            nonce = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-            sig = hmac.new(self.aiting_secret_key.encode('utf-8'), f"{nonce}{ts}".encode('utf-8'), hashlib.sha256).hexdigest()
-            read_jf_headers.update({"X-Request-Timestamp": ts, "X-Request-Nonce": nonce, "X-Request-Signature": sig})
-        await self.http.post("https://m.jf.10010.com/jf-external-application/jftask/toFinish", headers=read_jf_headers, json={"taskCode": "s789063716815591424"})
-        await asyncio.sleep(1)
-        # 第二步: 初始化阅读环境(newRead) - 字段来自抓包解密
-        bp = self._get_woread_param()
-        new_read_sign = {"cntIndex": self.wr_cntindex, "timestamp": bp["timestamp"], "token": bp["token"], "userId": bp["userId"], "userIndex": bp["userIndex"], "userAccount": bp["userAccount"], "verifyCode": bp["verifyCode"]}
-        res_new = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/history/newRead", headers=wr_headers, json={"sign": self._woread_encode(new_read_sign)})
-        # 从 newRead 响应中获取章节索引和内容类型
-        chapter_all_index = getattr(self, 'wr_chapterallindex', '')
-        cnttype = 1
-        if (nr := res_new.get("result")) and str(nr.get("code")) == "0000" and (nd := nr.get("data")):
-            chapter_all_index = nd.get("chapterindex", chapter_all_index)
-            cnttype = nd.get("cnttype", 1)
-        # 第三步: 实际等待 121 秒后上报，确保时间差 > counttime，绕过反作弊校验
-        wait_sec = random.uniform(121, 123)
-        self.logger.log(f"爱听阅读: 开始计时，等待{wait_sec:.0f}秒...")
-        await asyncio.sleep(wait_sec)
-        bp2 = self._get_woread_param()
-        counttime = random.randint(118000, 120000)
-        add_param = {
-            "userid": bp2["userid"], "counttime": counttime, "phone": self.mobile, "readtype": 3,
-            "cntindex": getattr(self, 'wr_cntindex', ''), "catid": getattr(self, 'wr_catid', '0'),
-            "pageIndex": getattr(self, 'wr_catid', ''), "cardid": getattr(self, 'wr_cardid', ''),
-            "cnttype": cnttype, "chapterallindex": chapter_all_index, "chapterseno": "1",
-            "channelid": "", "chapterid": "-1", "isend": "0", "timbre": "", "speed": "1.0", "anchor": "",
-            "timestamp": bp2["timestamp"], "token": bp2["token"],
-            "userIndex": bp2["userIndex"], "userAccount": bp2["userAccount"], "verifyCode": bp2["verifyCode"],
-        }
-        res = await self.http.post("https://10010.woread.com.cn/ng_woread_service/rest/basics/addreadtime", headers=wr_headers, json={"sign": self._woread_encode(add_param)})
-        if (result := res["result"]) and str(result.get("code")) == "0000":
-            data = result.get("data", {})
-            readtime_sec = int(data.get("readtime", 0)) // 1000
-            if data.get("completiontaskflag") == 1: self.logger.log(f"爱听阅读任务完成，积分已入账 (累计{readtime_sec}s)", notify=True)
-            else: self.logger.log(f"爱听阅读上报成功: 累计{readtime_sec}s")
-        else: self.logger.log(f"爱听阅读上报失败: {res['result']}")
-
-
-    @async_task_silent
-    async def _aiting_get_secret_key(self, ticket):
-        headers = {"ticket": ticket, "pageid": "s789081246969976832", "partnersid": "1706", "clienttype": "aiting_android", "Accept": "application/json, text/plain, */*", "User-Agent": "Mozilla/5.0 (Linux; Android 12; Redmi K30 Pro) AppleWebKit/537.36 WoReaderApp/Android"}
-        res = await self.http.get("https://m.jf.10010.com/jf-external-application/jftask/getSecretKey", headers=headers)
-        if (result := res.get("result", {})) and str(result.get("code")) == "0000" and (sk := result.get("data", {}).get("secretKey")):
-            self.aiting_secret_key = sk
-
-    async def aiting_task(self):
-        if not await self.aiting_login_flow(): return self.logger.log("爱听: 登录失败，跳过任务")
-        self.aiting_biz_ticket = await self.aiting_get_ticket()
-        if not self.aiting_biz_ticket: return self.logger.log("爱听: 获取Ticket失败")
-        await self._aiting_get_secret_key(self.aiting_biz_ticket)
-        await self.aiting_sign_in()
-        await self.aiting_read_task(self.aiting_biz_ticket)
-        await self.aiting_do_tasks(self.aiting_biz_ticket)
-        await self.jf_get_user_info(self.aiting_biz_ticket)
-
     async def user_task(self):
         if not await self.online(): return
-        for task in [self.sign_task, self.xj_task, self.ttlxj_task, self.ltzf_task, self.market_task, self.wostore_cloud_task, self.security_butler_task, self.shangdu_task, self.woread_task, self.aiting_task]: await task()
+        for task in [
+            self.sign_task,
+            self.xj_task,
+            self.ttlxj_task,
+            self.ltzf_task,
+            self.market_task,
+            self.security_butler_task,
+            self.shangdu_task,
+        ]: await task()
 
 async def main():
     start_time = datetime.now()
