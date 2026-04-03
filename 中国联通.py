@@ -50,6 +50,12 @@ WOCARE_CHANNEL_ID, WOCARE_SIGN_KEY, WOCARE_CHANNEL_TYPE, WOCARE_VERSION = "beea1
 EXCHANGE_COUPON_CONFIG = {"1元话费券": False, "3元话费券": False, "5元话费券": False, "10元话费券": False, "18元话费券": False}
 COUPON_PRODUCT_MAP = {k: v for k, v in zip(EXCHANGE_COUPON_CONFIG.keys(), ["25122309441216995", "25122309482612026", "25122309512816188", "25122309543215732", "25122310293512803"])}
 COUPON_POINTS_REQUIRED = {k: int(k.split("元")[0]) * 100 for k in EXCHANGE_COUPON_CONFIG}
+WOSTORE_CLOUD_CHANNEL_ID = "ST-Zujian001-gs"
+WOSTORE_CLOUD_CP_ID = "91002997"
+WOSTORE_CLOUD_ACTIVITY_CODE = "HD2026033000125"
+WOSTORE_CLOUD_POINTS_SIGN_CODE = "Points_Sign_2507"
+WOSTORE_CLOUD_DIALOG_URL = f"https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id={WOSTORE_CLOUD_CHANNEL_ID}&cp_id={WOSTORE_CLOUD_CP_ID}"
+WOSTORE_CLOUD_POINTS_TASK_CODE = "2508-01"
 
 # ====================  Utils  ====================
 _print_lock = asyncio.Lock()
@@ -293,6 +299,84 @@ class CustomUserService:
         if not (ticket_info := await self.open_plat_line_new(target_url))["ticket"]: return
         if not await self.wocare_get_token(ticket_info["ticket"]): return
         for task in [{"name": "星座配对", "id": 2}, {"name": "大转盘", "id": 3}, {"name": "盲盒抽奖", "id": 4}]: await self.wocare_get_draw_task(task); await self.wocare_load_init(task)
+
+    def _wostore_cloud_referer(self, cp_token=""):
+        base = f"https://uphone.wostore.cn/h5/lt/SpringRenewal?ch={WOSTORE_CLOUD_CHANNEL_ID}&system=h5"
+        return f"{base}&cpToken={cp_token}&channelId={WOSTORE_CLOUD_CHANNEL_ID}" if cp_token else f"{base}&channelId={WOSTORE_CLOUD_CHANNEL_ID}"
+
+    @async_task("云手机")
+    async def wostore_cloud_task(self):
+        if not (ticket_info := await self.open_plat_line_new(WOSTORE_CLOUD_DIALOG_URL))["ticket"]: return
+        if not (tokens := await self.wostore_cloud_login(ticket_info["ticket"])): return
+        cp_token, user_token = tokens
+        await self.wostore_cloud_points_sign(user_token)
+        await asyncio.sleep(1)
+        task_data = await self.wostore_cloud_task_list(user_token, cp_token)
+        if not task_data: return
+        points_task = next((task for task in task_data.get("taskList", []) if task.get("taskCode") == WOSTORE_CLOUD_POINTS_TASK_CODE), None)
+        unclaimed_tasks = [task for task in task_data.get("taskList", []) if task.get("status") == "UNCLAIMED" and task.get("taskCode")]
+        if not unclaimed_tasks and int(task_data.get("rafflesLeftCount", 0) or 0) < 1 and points_task and points_task.get("status") == "OBTAINED":
+            self.logger.log("云手机: 今日已抽奖")
+        for task in unclaimed_tasks:
+            await asyncio.sleep(1)
+            await self.wostore_cloud_get_chance(user_token, cp_token, task.get("taskCode", ""))
+        await asyncio.sleep(1)
+        if not (task_data := await self.wostore_cloud_task_list(user_token, cp_token)): return
+        if not (raffles_left := int(task_data.get("rafflesLeftCount", 0) or 0)): return
+        for _ in range(raffles_left):
+            await asyncio.sleep(1)
+            await self.wostore_cloud_draw(user_token, cp_token)
+
+    @async_task_silent
+    async def wostore_cloud_login(self, ticket):
+        referer = f"{WOSTORE_CLOUD_DIALOG_URL}&ticket={ticket}"
+        data = {"cpId": WOSTORE_CLOUD_CP_ID, "channelId": WOSTORE_CLOUD_CHANNEL_ID, "ticket": ticket, "env": "prod", "transId": f"S2ndpage1235+开福袋！+F1+CJDD00D0001+{self.app_version}", "qkActId": None}
+        res = await self.http.post("https://member.zlhz.wostore.cn/wcy_member/yunPhone/h5Awake/businessHall", json=data, headers={"Host": "member.zlhz.wostore.cn", "Origin": "https://h5forphone.wostore.cn", "Referer": referer})
+        if not isinstance((result := res["result"]), dict) or result.get("code") != "0":
+            self.logger.log(f"云手机获取cpToken失败: {result}")
+            return None
+        redirect_url = result.get("data", {}).get("url", "")
+        query = parse_qs(urlparse(redirect_url).query)
+        cp_token = (query.get("token") or query.get("cpToken") or [""])[0]
+        if not cp_token:
+            self.logger.log("云手机获取cpToken失败: 跳转链接中无token")
+            return None
+        await asyncio.sleep(1)
+        login_headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": cp_token}
+        login_data = {"identityType": "cloudPhoneLogin", "code": cp_token, "channelId": WOSTORE_CLOUD_CHANNEL_ID, "activityId": WOSTORE_CLOUD_ACTIVITY_CODE, "device": "device"}
+        res2 = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/login", json=login_data, headers=login_headers)
+        if isinstance((result2 := res2["result"]), dict) and result2.get("code") == 200 and (user_token := result2.get("data", {}).get("user_token")):
+            return cp_token, user_token
+        self.logger.log(f"云手机登录失败: {result2}")
+        return None
+
+    @async_task_silent
+    async def wostore_cloud_points_sign(self, user_token):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": "https://uphone.wostore.cn/h5/lt/points", "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/points/v1/sign", json={"activityCode": WOSTORE_CLOUD_POINTS_SIGN_CODE}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("code") in [200, 10054]: return True
+        if isinstance(result, dict) and "已签到" in str(result.get("msg", "")): return True
+        return False
+
+    @async_task_silent
+    async def wostore_cloud_task_list(self, user_token, cp_token):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/task/list", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("code") == 200: return result
+        return None
+
+    @async_task_silent
+    async def wostore_cloud_get_chance(self, user_token, cp_token, task_code):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/user/task/raffle/get", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE, "taskCode": task_code}, headers=headers)
+        return bool(isinstance((result := res["result"]), dict) and result.get("code") == 200)
+
+    @async_task("云手机抽奖")
+    async def wostore_cloud_draw(self, user_token, cp_token):
+        headers = {"Host": "uphone.wostore.cn", "Origin": "https://uphone.wostore.cn", "Referer": self._wostore_cloud_referer(cp_token), "X-USR-TOKEN": user_token}
+        res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/lottery", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("code") == 200:
+            self.logger.log(f"云手机抽奖成功: {result.get('prizeName', result.get('msg', '成功'))}", notify=True)
 
     @async_task("联通祝福获取sid")
     async def wocare_get_token(self, ticket):
@@ -827,7 +911,13 @@ class CustomUserService:
 
     async def shangdu_task(self):
         if "河南" not in self.province: return
-        if (ticket := await self.shangdu_get_ticket()) and await self.shangdu_login(ticket): await asyncio.sleep(1); await self.shangdu_signin()
+        if not (ticket := await self.shangdu_get_ticket()) or not await self.shangdu_login(ticket): return
+        await asyncio.sleep(1)
+        if (signed := await self.shangdu_get_sign_status()) is False: await self.shangdu_signin()
+        elif signed is True: self.logger.log("商都福利: 今日已签到")
+        await asyncio.sleep(1)
+        if not (lottery_info := await self.shangdu_get_lottery_info()) or not lottery_info.get("lotteryFlag"): return
+        for _ in range(int(lottery_info.get("lotteryTimes", 0) or 0)): await asyncio.sleep(1); await self.shangdu_draw()
 
     async def shangdu_get_ticket(self):
         if not getattr(self, "ecs_token", None): self.logger.log("商都福利: 缺少 ecs_token，请检查是否已执行 online 登录"); return None
@@ -837,51 +927,47 @@ class CustomUserService:
             self.logger.log(f"商都福利: Ticket 获取失败 {r}"); return None
         except Exception as e: self.logger.log(f"商都福利获取Ticket异常: {e}"); return None
 
+    async def shangdu_api(self, method, path, **kwargs):
+        headers = {"Host": "app.shangdu.com", "Origin": "https://app.shangdu.com", "Referer": "https://app.shangdu.com/monthlyBenefit/index.html", "edop_flag": "0", "Accept": "*"}
+        if method == "POST": headers["Content-Type"] = "application/json"
+        return (await self.http.request(method, f"https://app.shangdu.com/monthlyBenefit/v1/{path}", headers={**headers, **kwargs.pop('headers', {})}, **kwargs))["result"]
+
     async def shangdu_login(self, ticket):
-        sd_headers = {"Host": "app.shangdu.com", "Origin": "https://app.shangdu.com", "Referer": "https://app.shangdu.com/monthlyBenefit/index.html", "edop_flag": "0", "Accept": "application/json, text/plain, */*"}
         try:
-            res = await self.http.get(f"https://app.shangdu.com/monthlyBenefit/v1/common/config?ticket={ticket}", headers=sd_headers)
-            if isinstance((r := res["result"]), dict) and r.get("code") == "0000": return True
+            await self.shangdu_api("POST", "common/getKey", json={"scene": "monthlybenefit"})
+            if isinstance((r := await self.shangdu_api("GET", f"common/config?ticket={ticket}")), dict) and r.get("code") == "0000": return True
             self.logger.log(f"商都福利: 登录激活失败 {r}"); return False
         except Exception as e: self.logger.log(f"商都福利登录异常: {e}"); return False
 
     async def shangdu_get_sign_status(self):
-        sd_headers = {"Host": "app.shangdu.com", "Origin": "https://app.shangdu.com", "Referer": "https://app.shangdu.com/monthlyBenefit/index.html", "edop_flag": "0", "Content-Type": "application/json"}
         try:
-            res = await self.http.post("https://app.shangdu.com/monthlyBenefit/v1/signIn/queryCumulativeSignAxis", headers=sd_headers, json={})
-            return res["result"].get("data", {}).get("todaySignFlag") == "1" if isinstance(res["result"], dict) and res["result"].get("code") == "0000" else None
+            r = await self.shangdu_api("POST", "signIn/queryCumulativeSignAxis", json={})
+            return r.get("data", {}).get("todaySignFlag") == "1" if isinstance(r, dict) and r.get("code") == "0000" else None
         except: return None
 
     @async_task("商都福利签到")
     async def shangdu_signin(self):
-        sd_headers = {"Host": "app.shangdu.com", "Origin": "https://app.shangdu.com", "Referer": "https://app.shangdu.com/monthlyBenefit/index.html", "edop_flag": "0", "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json"}
-        res = await self.http.post("https://app.shangdu.com/monthlyBenefit/v1/signIn/userSignIn", headers=sd_headers, json={})
-        if not isinstance((result := res["result"]), dict): return
-        code = result.get("code")
-        if code == "0000":
-            data = result.get("data", {})
-            if data.get("value") == "0001": return self.logger.log("商都福利: 签到失败 (Cookie无效/未登录)")
-            prize_name = (data.get("prizeResp") or {}).get("prizeName", "")
-            if str(data.get("signFlag", "")) == "1": self.logger.log(f"商都福利签到成功: 获得 {prize_name}" if prize_name else "商都福利: 今日已签到", notify=bool(prize_name))
-            else: self.logger.log(f"商都福利签到成功 (signFlag={data.get('signFlag')})")
-        elif code == "0019":
-            await asyncio.sleep(1)
-            if (is_signed := await self.shangdu_get_sign_status()) is True: self.logger.log("商都福利: 今日已签到")
-            elif is_signed is False: self.logger.log("商都福利: 服务端异常(返回重复签到但实际未签)，尝试重试..."); await asyncio.sleep(2); await self._shangdu_signin_retry()
-            else: self.logger.log("商都福利: 今日已签到 (状态查询失败)")
-        else: self.logger.log(f"商都福利签到失败: {result.get('msg') or result.get('desc') or ''} (code={code})")
+        if not isinstance((result := await self.shangdu_api("POST", "signIn/userSignIn", json={})), dict): return
+        if result.get("code") == "0000" and str(result.get("data", {}).get("signFlag", "")) == "1": self.logger.log("商都福利签到成功")
+        elif await self.shangdu_get_sign_status() is True: self.logger.log("商都福利: 今日已签到")
+        else: self.logger.log(f"商都福利签到失败: {result.get('msg') or result.get('desc') or result}")
 
     @async_task_silent
-    async def _shangdu_signin_retry(self):
-        sd_headers = {"Host": "app.shangdu.com", "Origin": "https://app.shangdu.com", "Referer": "https://app.shangdu.com/monthlyBenefit/index.html", "edop_flag": "0", "X-Requested-With": "XMLHttpRequest", "Content-Type": "application/json"}
-        res = await self.http.post("https://app.shangdu.com/monthlyBenefit/v1/signIn/userSignIn", headers=sd_headers, json={})
-        if isinstance((result := res["result"]), dict):
-            code = result.get("code")
-            if code == "0000":
-                prize_name = (result.get("data", {}).get("prizeResp") or {}).get("prizeName", "")
-                self.logger.log(f"商都福利签到成功(重试): 获得 {prize_name}" if prize_name else "商都福利签到成功(重试)", notify=bool(prize_name))
-            elif code == "0019": self.logger.log("商都福利: 重试仍返回重复签到，请检查")
-            else: self.logger.log(f"商都福利签到重试失败: {result.get('msg') or result.get('desc') or ''}")
+    async def shangdu_get_lottery_info(self):
+        if isinstance((result := await self.shangdu_api("POST", "lottery/getLotteryInfo", json={})), dict) and result.get("code") == "0000": return result.get("data", {})
+        self.logger.log(f"商都福利获取抽奖次数失败: {result}")
+        return None
+
+    @async_task("商都福利抽奖")
+    async def shangdu_draw(self):
+        if not isinstance((lottery := await self.shangdu_api("POST", "lottery/lottery", json={})), dict) or lottery.get("code") != "0000":
+            return self.logger.log(f"商都福利抽奖失败: {lottery}")
+        if not (draw_uuid := lottery.get("data", {}).get("uuid")): return self.logger.log("商都福利抽奖失败: 缺少uuid")
+        if not isinstance((result := await self.shangdu_api("POST", "lottery/lotteryResult", json={"uuid": draw_uuid})), dict) or result.get("code") != "0000":
+            return self.logger.log(f"商都福利查询抽奖结果失败: {result}")
+        data = result.get("data", {})
+        if str(data.get("isWin")) == "1": self.logger.log(f"商都福利抽奖: {data.get('prizeName', '中奖')}", notify=True)
+        else: self.logger.log("商都福利抽奖: 未中奖")
 
     async def user_task(self):
         if not await self.online(): return
@@ -890,6 +976,7 @@ class CustomUserService:
             self.xj_task,
             self.ttlxj_task,
             self.ltzf_task,
+            self.wostore_cloud_task,
             self.market_task,
             self.security_butler_task,
             self.shangdu_task,
