@@ -315,6 +315,7 @@ class CustomUserService:
         if not task_data: return
         points_task = next((task for task in task_data.get("taskList", []) if task.get("taskCode") == WOSTORE_CLOUD_POINTS_TASK_CODE), None)
         unclaimed_tasks = [task for task in task_data.get("taskList", []) if task.get("status") == "UNCLAIMED" and task.get("taskCode")]
+        claimed_hidden_task = bool(unclaimed_tasks)
         if not unclaimed_tasks and int(task_data.get("rafflesLeftCount", 0) or 0) < 1 and points_task and points_task.get("status") == "OBTAINED":
             self.logger.log("云手机: 今日已抽奖")
         for task in unclaimed_tasks:
@@ -322,7 +323,9 @@ class CustomUserService:
             await self.wostore_cloud_get_chance(user_token, cp_token, task.get("taskCode", ""))
         await asyncio.sleep(1)
         if not (task_data := await self.wostore_cloud_task_list(user_token, cp_token)): return
-        if not (raffles_left := int(task_data.get("rafflesLeftCount", 0) or 0)): return
+        if not (raffles_left := int(task_data.get("rafflesLeftCount", 0) or 0)):
+            if claimed_hidden_task: self.logger.log("云手机: 已领取任务但无抽奖次数")
+            return
         for _ in range(raffles_left):
             await asyncio.sleep(1)
             await self.wostore_cloud_draw(user_token, cp_token)
@@ -377,6 +380,9 @@ class CustomUserService:
         res = await self.http.post("https://uphone.wostore.cn/h5api/activity-service/lottery", json={"activityCode": WOSTORE_CLOUD_ACTIVITY_CODE}, headers=headers)
         if isinstance((result := res["result"]), dict) and result.get("code") == 200:
             self.logger.log(f"云手机抽奖成功: {result.get('prizeName', result.get('msg', '成功'))}", notify=True)
+        elif isinstance(result, dict) and result.get("msg"):
+            self.logger.log(f"云手机抽奖失败: {result.get('msg')}")
+        else: self.logger.log(f"云手机抽奖失败: {result}")
 
     @async_task("联通祝福获取sid")
     async def wocare_get_token(self, ticket):
