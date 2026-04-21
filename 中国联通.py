@@ -1,7 +1,7 @@
 import asyncio, base64, hashlib, hmac, json, os, random, string, time, uuid
 from datetime import datetime
 from functools import wraps
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlencode, urlparse
 
 import httpx
 from Crypto.Cipher import AES
@@ -41,8 +41,14 @@ def _sec_headers(self):
 # ====================  Constants  ====================
 APP_VERSION, SHOW_PRIZE_POOL = "iphone_c@11.0503", True
 MARKET_PRIVILEGE_START_HOUR = 10
-MARKET_PRIVILEGE_STAGGER_SECONDS = 1.5
-MARKET_PRIVILEGE_MAX_RETRIES = 4
+MARKET_PRIVILEGE_STAGGER_SECONDS = 0.15
+MARKET_PRIVILEGE_WARMUP_SECONDS = 20
+MARKET_PRIVILEGE_MAX_RETRIES = 18
+MARKET_PRIVILEGE_DETAIL_TIMEOUT = 4.0
+MARKET_PRIVILEGE_ACTION_TIMEOUT = 4.5
+MARKET_PRIVILEGE_RETRY_DELAYS = (0.10, 0.12, 0.15, 0.18, 0.22, 0.28, 0.36, 0.45, 0.55, 0.70, 0.90, 1.10, 1.30, 1.60, 1.90, 2.20, 2.60, 3.00)
+MARKET_PRIVILEGE_RECORD_TIMEOUT, MARKET_PRIVILEGE_RECORD_CHECK_INTERVAL = 4.0, 2.0
+MARKET_PRIVILEGE_EVENT_THEME = "权益天天领"
 USER_AGENT = lambda v: f"Mozilla/5.0 (iPhone; CPU iPhone OS 16_1_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{{version:{v}}}"
 APP_ID = "86b8be06f56ba55e9fa7dff134c6b16c62ca7f319da4a958dd0afa0bf9f36f1daa9922869a8d2313b6f2f9f3b57f2901f0021c4575e4b6949ae18b7f6761d465c12321788dcd980aa1a641789d1188bb"
 CLIENT_ID = "73b138fd-250c-4126-94e2-48cbcc8b9cbe"
@@ -56,6 +62,20 @@ WOSTORE_CLOUD_ACTIVITY_CODE = "HD2026033000125"
 WOSTORE_CLOUD_POINTS_SIGN_CODE = "Points_Sign_2507"
 WOSTORE_CLOUD_DIALOG_URL = f"https://h5forphone.wostore.cn/cloudPhone/dialogCloudPhone.html?channel_id={WOSTORE_CLOUD_CHANNEL_ID}&cp_id={WOSTORE_CLOUD_CP_ID}"
 WOSTORE_CLOUD_POINTS_TASK_CODE = "2508-01"
+PAN_SPEED_ACTIVITY_ID = "Mjc="
+PAN_SPEED_ACTIVITY_CLIENT_ID = "1001000156"
+PAN_SPEED_CLOUD_CLIENT_ID = "1001000003"
+PAN_SPEED_OPEN_APP_ID = "edop_unicom_d67b3e30"
+PAN_SPEED_APP_VERSION = "iphone_c@12.1001"
+PAN_SPEED_TOUCHPOINT = "300200030001"
+PAN_SPEED_USER_AGENT = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 unicom{version:iphone_c@12.1001};ltst;OSVersion/16.6"
+PAN_SPEED_AES_IV = "wNSOYIB1k1DjY5lA"
+PAN_SPEED_DISPATCHER_KEY = "Py1J67PAQoCb8Iel"
+PAN_SPEED_POINT_KEY = "oN6@sH8!fV1{vJ1#"
+PAN_SPEED_POINT_IV = "rE6bK2lY5nC9zD6g"
+PAN_SPEED_POINT_APP_ID = "huodong20260401"
+PAN_SPEED_UPLOAD_URLS = ("https://tjupload.pan.wo.cn/openapi/client/upload2C", "https://gxnewupload.pan.wo.cn/openapi/client/upload2C")
+PAN_SPEED_FALLBACK_PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wn6mQAAAABJRU5ErkJggg=="
 
 # ====================  Utils  ====================
 _print_lock = asyncio.Lock()
@@ -73,21 +93,43 @@ class Logger:
 class HttpClient:
     def __init__(self, logger_instance):
         self.logger, self.headers, self.cookies, self.timeout, self.retries = logger_instance, {"User-Agent": USER_AGENT(APP_VERSION), "Connection": "keep-alive"}, httpx.Cookies(), 50.0, 3
+        self.client = None
+        self.client_limits = httpx.Limits(max_keepalive_connections=20, max_connections=20)
+
+    async def _get_client(self):
+        if not self.client or self.client.is_closed:
+            self.client = httpx.AsyncClient(cookies=self.cookies, http2=False, follow_redirects=False, timeout=self.timeout, verify=False, limits=self.client_limits)
+        return self.client
+
+    async def close(self):
+        if self.client and not self.client.is_closed:
+            await self.client.aclose()
+        self.client = None
+
     async def request(self, method, url, **kwargs):
         headers = {**self.headers, **kwargs.pop("headers", {})}
         cookies = kwargs.pop("cookies", self.cookies)
-        for attempt in range(self.retries):
+        timeout = kwargs.pop("timeout", self.timeout)
+        retries = kwargs.pop("retries", self.retries)
+        use_temp_client = cookies is not self.cookies
+        for attempt in range(retries):
             try:
-                async with httpx.AsyncClient(cookies=cookies, http2=False, follow_redirects=False, timeout=self.timeout, verify=False) as client:
-                    response = await client.request(method, url, headers=headers, **kwargs)
-                    self.cookies.update(response.cookies)
-                    text = response.text
-                    if text.strip().startswith(("{", "[")):
-                        try: result = response.json()
-                        except Exception: result = text
-                    else: result = text
-                    return {"statusCode": response.status_code, "headers": response.headers, "result": result}
-            except Exception: await asyncio.sleep(1 + attempt * 2)
+                if use_temp_client:
+                    async with httpx.AsyncClient(cookies=cookies, http2=False, follow_redirects=False, timeout=self.timeout, verify=False, limits=self.client_limits) as client:
+                        response = await client.request(method, url, headers=headers, timeout=timeout, **kwargs)
+                else:
+                    client = await self._get_client()
+                    response = await client.request(method, url, headers=headers, timeout=timeout, **kwargs)
+                    client.cookies.update(response.cookies)
+                self.cookies.update(response.cookies)
+                text = response.text
+                if text.strip().startswith(("{", "[")):
+                    try: result = response.json()
+                    except Exception: result = text
+                else: result = text
+                return {"statusCode": response.status_code, "headers": response.headers, "result": result}
+            except Exception:
+                if attempt + 1 < retries: await asyncio.sleep(1 + attempt * 2)
         return {"statusCode": -1, "headers": {}, "result": None}
     get = lambda self, url, **kw: self.request("GET", url, **kw)
     post = lambda self, url, **kw: self.request("POST", url, **kw)
@@ -113,6 +155,19 @@ class MarketEncrypt:
             cipher = AES.new(cls.KEY.encode(), AES.MODE_ECB)
             return base64.b64encode(cipher.encrypt(pad(text.encode(), AES.block_size))).decode()
         except: return data
+
+
+def aes_cbc_base64_encrypt(data, key, iv):
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False) if isinstance(data, (dict, list)) else str(data)
+    aes_key = (key or "")[:16].encode("utf-8")
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv.encode("utf-8"))
+    return base64.b64encode(cipher.encrypt(pad(text.encode("utf-8"), AES.block_size))).decode()
+
+
+def aes_cbc_base64_decrypt(data, key, iv):
+    aes_key = (key or "")[:16].encode("utf-8")
+    cipher = AES.new(aes_key, AES.MODE_CBC, iv.encode("utf-8"))
+    return unpad(cipher.decrypt(base64.b64decode(data)), AES.block_size).decode("utf-8")
 
 class MarketRaffleState:
     def __init__(self): self.checked, self.has_prizes, self.prizes, self.lock = False, False, [], asyncio.Lock()
@@ -163,6 +218,7 @@ class CustomUserService:
         self.rpt_id = self.market_token = self.market_login_id = self.market_rn_str = self.xj_token = self.wocare_token = self.wocare_sid = self.ecs_token = ""
         self.session_id = self.token_id = ""
         self.xj_comm_high_flag = ""
+        self.market_privilege_cache = None
         self.sec_old_points = None
         self.sec_ticket1 = self.sec_token = self.sec_ticket = self.sec_jea_id = self.sec_secret_key = ""
         self.initial_telephone_amount = 0.0
@@ -183,13 +239,299 @@ class CustomUserService:
         return False
 
     @async_task("获取ticket")
-    async def open_plat_line_new(self, url):
-        res = await self.http.get("https://m.client.10010.com/mobileService/openPlatform/openPlatLineNew.htm", params={"to_url": url})
+    async def open_plat_line_new(self, url, headers=None):
+        res = await self.http.get("https://m.client.10010.com/mobileService/openPlatform/openPlatLineNew.htm", params={"to_url": url}, headers=headers or {})
         if location := (res["headers"].get("location") or res["headers"].get("Location")):
             qs = parse_qs(urlparse(location).query)
             return {"ticket": qs.get("ticket", [""])[0], "type": qs.get("type", ["02"])[0], "loc": location}
         self.logger.log("获取ticket失败: 无location")
         return {"ticket": "", "type": "", "loc": ""}
+
+    def pan_speed_base_headers(self):
+        return {"User-Agent": PAN_SPEED_USER_AGENT}
+
+    def pan_speed_activity_headers(self, pan_token, referer, content_type: str | None = "application/json"):
+        headers = {
+            **self.pan_speed_base_headers(),
+            "Origin": "https://panservice.mail.wo.cn",
+            "Referer": referer,
+            "accesstoken": pan_token,
+            "X-YP-Access-Token": pan_token,
+            "token": pan_token,
+            "Access-Token": pan_token,
+            "clientId": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "client-id": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "X-YP-Client-Id": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "Client-Id": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "app-type": "unicom",
+            "source-type": "woapi",
+            "X-YP-Open-Version": "v1.0",
+        }
+        if content_type:
+            headers["Content-Type"] = content_type
+        return headers
+
+    def pan_speed_dispatcher_payload(self, key, body, channel, encrypt_key=None):
+        res_time = int(time.time() * 1000)
+        req_seq = random.randint(100000, 189998)
+        version = ""
+        sign = hashlib.md5(f"{key}{res_time}{req_seq}{channel}{version}".encode()).hexdigest()
+        request_body = dict(body)
+        if encrypt_key:
+            request_body = {"param": aes_cbc_base64_encrypt(request_body, encrypt_key, PAN_SPEED_AES_IV), "clientId": PAN_SPEED_CLOUD_CLIENT_ID, "secret": True}
+        return {"header": {"key": key, "resTime": res_time, "reqSeq": req_seq, "channel": channel, "version": version, "sign": sign}, "body": request_body}
+
+    def pan_speed_build_target_url(self, pan_token, touchpoint=PAN_SPEED_TOUCHPOINT):
+        return f"https://panservice.mail.wo.cn/h5/mobile/speed/start?activityId={PAN_SPEED_ACTIVITY_ID}&touchpoint={touchpoint}&clientid={PAN_SPEED_CLOUD_CLIENT_ID}&token={pan_token}"
+
+    def pan_speed_build_fallback_referer(self, pan_token, touchpoint=PAN_SPEED_TOUCHPOINT, ticket=""):
+        params = {
+            "activityId": PAN_SPEED_ACTIVITY_ID,
+            "type": "02",
+            "ticket": ticket,
+            "version": PAN_SPEED_APP_VERSION,
+            "timestamp": datetime.now().strftime("%Y%m%d%H%M%S"),
+            "desmobile": self.mobile,
+            "num": 0,
+            "postage": self.random_string(32, "0123456789abcdef"),
+            "touchpoint": touchpoint,
+            "clientid": PAN_SPEED_CLOUD_CLIENT_ID,
+            "token": pan_token,
+            "userNumber": self.mobile,
+        }
+        return f"https://panservice.mail.wo.cn/h5/mobile/speed/start?{urlencode(params)}"
+
+    @async_task_silent
+    async def pan_speed_get_ticket_by_native(self):
+        headers = self.pan_speed_base_headers()
+        res = await self.http.get("https://m.client.10010.com/edop_ng/getTicketByNative", params={"token": self.ecs_token, "appId": PAN_SPEED_OPEN_APP_ID}, headers=headers)
+        if isinstance((result := res["result"]), dict) and result.get("rsp_code") == "0000":
+            return result.get("ticket", "")
+        self.logger.log(f"联通云盘测速争霸获取native ticket失败: {result}")
+        return ""
+
+    @async_task_silent
+    async def pan_speed_auto_login(self, ticket):
+        headers = {**self.pan_speed_base_headers(), "Origin": "null", "Content-Type": "application/json", "accesstoken": ""}
+        payload = self.pan_speed_dispatcher_payload("HandheldHallAutoLoginV2", {"ticket": ticket, "clientId": PAN_SPEED_CLOUD_CLIENT_ID}, "wohome")
+        res = await self.http.post("https://panservice.mail.wo.cn/wohome/dispatcher", json=payload, headers=headers)
+        if isinstance((result := res["result"]), dict):
+            rsp = result.get("RSP", {})
+            data = rsp.get("DATA", {})
+            if rsp.get("RSP_CODE") == "0000" and data.get("token"):
+                return data
+        self.logger.log(f"联通云盘测速争霸云盘登录失败: {result}")
+        return None
+
+    @async_task_silent
+    async def pan_speed_open_activity(self, pan_token):
+        target_url = self.pan_speed_build_target_url(pan_token)
+        ticket_info = await self.open_plat_line_new(target_url, headers=self.pan_speed_base_headers())
+        referer = ticket_info.get("loc") or self.pan_speed_build_fallback_referer(pan_token, ticket=ticket_info.get("ticket", ""))
+        qs = parse_qs(urlparse(referer).query)
+        return {"referer": referer, "ticket": qs.get("ticket", [ticket_info.get("ticket", "")])[0], "touchpoint": qs.get("touchpoint", [PAN_SPEED_TOUCHPOINT])[0]}
+
+    @async_task_silent
+    async def pan_speed_query_user(self, pan_token, referer):
+        payload = self.pan_speed_dispatcher_payload("AppQueryUser", {"accessToken": pan_token}, "api-user", encrypt_key=PAN_SPEED_DISPATCHER_KEY)
+        res = await self.http.post("https://panservice.mail.wo.cn/api-user/dispatcher", json=payload, headers=self.pan_speed_activity_headers(pan_token, referer))
+        if not isinstance((result := res["result"]), dict):
+            return None
+        rsp = result.get("RSP", {})
+        if rsp.get("RSP_CODE") != "0000" or not rsp.get("DATA"):
+            return None
+        try:
+            return json.loads(aes_cbc_base64_decrypt(rsp["DATA"], PAN_SPEED_DISPATCHER_KEY, PAN_SPEED_AES_IV))
+        except Exception:
+            return None
+
+    @async_task_silent
+    async def pan_speed_activity_get(self, path, pan_token, referer, params=None):
+        res = await self.http.get(f"https://panservice.mail.wo.cn{path}", params=params or {}, headers=self.pan_speed_activity_headers(pan_token, referer, content_type=None))
+        return res["result"] if isinstance(res["result"], dict) else None
+
+    @async_task_silent
+    async def pan_speed_activity_post(self, path, pan_token, referer, body):
+        res = await self.http.post(f"https://panservice.mail.wo.cn{path}", json=body, headers=self.pan_speed_activity_headers(pan_token, referer))
+        return res["result"] if isinstance(res["result"], dict) else None
+
+    @async_task_silent
+    async def pan_speed_check_status(self, pan_token, referer):
+        result = await self.pan_speed_activity_get("/activity/checkActivityStatus", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        return None if not result else (result.get("result") or {}).get("state")
+
+    @async_task_silent
+    async def pan_speed_get_task_info(self, pan_token, referer):
+        result = await self.pan_speed_activity_get("/activity/lottery/activityRateTaskInfo", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        return None if not result else bool(result.get("result"))
+
+    @async_task_silent
+    async def pan_speed_get_lottery_times(self, pan_token, referer):
+        result = await self.pan_speed_activity_get("/activity/lottery/lottery-times", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        if not result:
+            return None
+        try:
+            return int(result.get("result", 0) or 0)
+        except Exception:
+            return 0
+
+    @async_task_silent
+    async def pan_speed_activate(self, pan_token, referer):
+        result = await self.pan_speed_activity_post("/activity/task/activate", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+        return bool(result and (result.get("meta") or {}).get("code") == "200")
+
+    @async_task_silent
+    async def pan_speed_lottery(self, pan_token, referer):
+        return await self.pan_speed_activity_post("/activity/lottery", pan_token, referer, {"activityId": PAN_SPEED_ACTIVITY_ID})
+
+    @async_task_silent
+    async def pan_speed_trace_upload(self, fid, file_size, page_start_ms, trans_start_ms, trans_end_ms, touchpoint):
+        event = {
+            "ea": "upload_speed",
+            "ett": "click",
+            "cp": "ActivePage_ceszb_kqcs",
+            "ts": trans_end_ms,
+            "et": {
+                "start": page_start_ms,
+                "end": trans_end_ms,
+                "trans_start": trans_start_ms,
+                "trans_end": trans_end_ms,
+                "fid": fid,
+                "size": file_size,
+                "netWork": 2,
+                "appId": PAN_SPEED_POINT_APP_ID,
+                "touchpoint": touchpoint,
+            },
+        }
+        payload = {
+            "mp": self.mobile,
+            "uu": PAN_SPEED_USER_AGENT,
+            "ct": "H5",
+            "uts": int(time.time() * 1000),
+            "cl": PAN_SPEED_ACTIVITY_CLIENT_ID,
+            "el": [event],
+        }
+        encrypted = aes_cbc_base64_encrypt(payload, PAN_SPEED_POINT_KEY, PAN_SPEED_POINT_IV)
+        headers = {"Origin": "https://panservice.mail.wo.cn", "Referer": "https://panservice.mail.wo.cn/", "User-Agent": PAN_SPEED_USER_AGENT, "Content-Type": "text/plain;charset=UTF-8"}
+        for url in ("https://panservice.mail.wo.cn/point/v1", "https://panservice.mail.wo.cn:18090/point/v1"):
+            res = await self.http.post(url, content=encrypted, headers=headers)
+            if res["statusCode"] == 200 and "success" in str(res["result"]).lower():
+                return True
+        return False
+
+    @async_task_silent
+    async def pan_speed_upload_file(self, pan_token, referer, file_name, file_bytes, mime_type):
+        file_info = {"batchNo": datetime.now().strftime("%Y%m%d%H%M%S"), "fileName": file_name, "fileSize": len(file_bytes), "fileType": 1, "directoryId": "0", "spaceType": "0"}
+        form_data = {
+            "uniqueId": f"{int(time.time() * 1000)}_{random.random()}",
+            "accessToken": pan_token,
+            "psToken": "undefined",
+            "totalPart": "1",
+            "partSize": str(len(file_bytes)),
+            "partIndex": "1",
+            "channel": "wocloud",
+            "fileName": file_name,
+            "fileSize": str(len(file_bytes)),
+            "directoryId": "0",
+            "fileInfo": aes_cbc_base64_encrypt(file_info, pan_token, PAN_SPEED_AES_IV),
+        }
+        headers = {**self.pan_speed_base_headers(), "Origin": "https://panservice.mail.wo.cn", "Referer": referer, "accessToken": pan_token, "access-token": pan_token, "client_id": PAN_SPEED_CLOUD_CLIENT_ID}
+        last_error = None
+        for upload_url in PAN_SPEED_UPLOAD_URLS:
+            res = await self.http.post(upload_url, data=form_data, files={"file": (file_name, file_bytes, mime_type)}, headers=headers)
+            if isinstance((result := res["result"]), dict) and result.get("code") == "0000":
+                self.logger.log(f"联通云盘测速争霸上传成功: {file_name}")
+                return result
+            last_error = result
+        self.logger.log(f"联通云盘测速争霸上传失败[{file_name}]: {last_error}")
+        return None
+
+    @async_task_silent
+    async def pan_speed_upload_and_wait(self, pan_token, referer, touchpoint, file_name, file_bytes, mime_type, old_times, page_start_ms):
+        trans_start_ms = int(time.time() * 1000)
+        upload_result = await self.pan_speed_upload_file(pan_token, referer, file_name, file_bytes, mime_type)
+        trans_end_ms = int(time.time() * 1000)
+        if not upload_result:
+            return None
+        fid = ((upload_result.get("data") or {}).get("fid") or "")
+        if fid:
+            await self.pan_speed_trace_upload(fid, len(file_bytes), page_start_ms, trans_start_ms, trans_end_ms, touchpoint)
+        task_done, lottery_times = False, old_times
+        for _ in range(8):
+            await asyncio.sleep(3)
+            latest_times = await self.pan_speed_get_lottery_times(pan_token, referer)
+            latest_task = await self.pan_speed_get_task_info(pan_token, referer)
+            if latest_times is not None:
+                lottery_times = latest_times
+            if latest_task is not None:
+                task_done = latest_task
+            if task_done or (lottery_times is not None and lottery_times > old_times):
+                break
+        return {"task_done": task_done, "lottery_times": lottery_times, "upload": upload_result}
+
+    @async_task("联通云盘测速争霸")
+    async def pan_speed_task(self):
+        if not self.ecs_token:
+            return
+        native_ticket = await self.pan_speed_get_ticket_by_native()
+        if not native_ticket:
+            return
+        if not (login_data := await self.pan_speed_auto_login(native_ticket)):
+            return
+        pan_token = login_data.get("token", "")
+        if not pan_token:
+            self.logger.log("联通云盘测速争霸获取云盘token失败")
+            return
+        activity_ctx = await self.pan_speed_open_activity(pan_token)
+        if not activity_ctx:
+            self.logger.log("联通云盘测速争霸打开活动页失败")
+            return
+        referer, touchpoint = activity_ctx["referer"], activity_ctx["touchpoint"]
+        await self.pan_speed_query_user(pan_token, referer)
+        state = await self.pan_speed_check_status(pan_token, referer)
+        task_done = await self.pan_speed_get_task_info(pan_token, referer)
+        lottery_times = await self.pan_speed_get_lottery_times(pan_token, referer)
+        self.logger.log(f"联通云盘测速争霸: state={state}, 上传任务={'已完成' if task_done else '未完成'}, 抽奖次数={lottery_times if lottery_times is not None else '未知'}")
+        if state == 0:
+            if await self.pan_speed_activate(pan_token, referer):
+                self.logger.log("联通云盘测速争霸: 已激活活动")
+                await asyncio.sleep(1)
+        if not task_done:
+            page_start_ms = int(time.time() * 1000)
+            txt_bytes = f"speed-test {self.mobile} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n".encode()
+            result = await self.pan_speed_upload_and_wait(pan_token, referer, touchpoint, "speed-test.txt", txt_bytes, "text/plain", lottery_times or 0, page_start_ms)
+            task_done = result["task_done"] if result else False
+            lottery_times = result["lottery_times"] if result and result["lottery_times"] is not None else lottery_times
+            if not task_done and not (lottery_times and lottery_times > 0):
+                self.logger.log("联通云盘测速争霸: txt上传未到账，回退为极小png重试")
+                png_bytes = base64.b64decode(PAN_SPEED_FALLBACK_PNG)
+                result = await self.pan_speed_upload_and_wait(pan_token, referer, touchpoint, "speed-test.png", png_bytes, "image/png", lottery_times or 0, page_start_ms)
+                task_done = result["task_done"] if result else task_done
+                lottery_times = result["lottery_times"] if result and result["lottery_times"] is not None else lottery_times
+        if lottery_times is None:
+            lottery_times = await self.pan_speed_get_lottery_times(pan_token, referer) or 0
+        if task_done:
+            self.logger.log(f"联通云盘测速争霸: 上传任务已完成，当前抽奖次数 {lottery_times}")
+        elif lottery_times:
+            self.logger.log(f"联通云盘测速争霸: 已获得抽奖次数 {lottery_times}")
+        else:
+            self.logger.log("联通云盘测速争霸: 未拿到抽奖次数")
+            return
+        while lottery_times > 0:
+            result = await self.pan_speed_lottery(pan_token, referer)
+            prize_info = (result or {}).get("result") or {}
+            if (result or {}).get("meta", {}).get("code") == "200":
+                prize_name = prize_info.get("prizeName") or "谢谢参与"
+                self.logger.log(f"联通云盘测速争霸抽奖: {prize_name}", notify=True)
+                lottery_times = int(prize_info.get("lotteryTimes", max(lottery_times - 1, 0)) or 0)
+            else:
+                self.logger.log(f"联通云盘测速争霸抽奖失败: {result}")
+                break
+            if lottery_times <= 0:
+                latest_times = await self.pan_speed_get_lottery_times(pan_token, referer)
+                lottery_times = latest_times if latest_times is not None else 0
+            if lottery_times > 0:
+                await asyncio.sleep(1)
 
     async def sign_task(self):
         await self.sign_get_continuous()
@@ -318,13 +660,16 @@ class CustomUserService:
         claimed_hidden_task = bool(unclaimed_tasks)
         if not unclaimed_tasks and int(task_data.get("rafflesLeftCount", 0) or 0) < 1 and points_task and points_task.get("status") == "OBTAINED":
             self.logger.log("云手机: 今日已抽奖")
+            return
         for task in unclaimed_tasks:
             await asyncio.sleep(1)
             await self.wostore_cloud_get_chance(user_token, cp_token, task.get("taskCode", ""))
         await asyncio.sleep(1)
         if not (task_data := await self.wostore_cloud_task_list(user_token, cp_token)): return
+        points_task = next((task for task in task_data.get("taskList", []) if task.get("taskCode") == WOSTORE_CLOUD_POINTS_TASK_CODE), None)
         if not (raffles_left := int(task_data.get("rafflesLeftCount", 0) or 0)):
-            if claimed_hidden_task: self.logger.log("云手机: 已领取任务但无抽奖次数")
+            if points_task and points_task.get("status") == "OBTAINED": self.logger.log("云手机: 今日已抽奖")
+            elif claimed_hidden_task: self.logger.log("云手机: 已领取任务但无抽奖次数")
             return
         for _ in range(raffles_left):
             await asyncio.sleep(1)
@@ -468,10 +813,10 @@ class CustomUserService:
 
     async def market_task(self):
         if not await self.market_login(): return
+        await self.market_privilege_task()
         await self.market_share_task()
         await self.market_watering_task()
         await self.market_raffle_task()
-        await self.market_privilege_task()
 
     @async_task("权益超市登录")
     async def market_login(self):
@@ -576,31 +921,26 @@ class CustomUserService:
     async def market_privilege_task(self):
         if not self.market_token: return
         now = datetime.now()
-        if now.hour < MARKET_PRIVILEGE_START_HOUR: return self.logger.log(f"优享权益: 未到{MARKET_PRIVILEGE_START_HOUR}点，跳过任务")
-        stagger_seconds = max(0, (self.index - 1) * MARKET_PRIVILEGE_STAGGER_SECONDS + random.uniform(0.2, 0.8))
+        start_time = self._market_privilege_start_time(now)
+        if now < start_time:
+            if (wait_seconds := (start_time - now).total_seconds()) > 300: return self.logger.log(f"优享权益: 未到{MARKET_PRIVILEGE_START_HOUR}点，跳过任务")
+            self.logger.log(f"优享权益: 等待 {wait_seconds:.0f} 秒到{MARKET_PRIVILEGE_START_HOUR}点开抢")
+            if (warmup_sleep := wait_seconds - MARKET_PRIVILEGE_WARMUP_SECONDS) > 0: await asyncio.sleep(warmup_sleep)
+            current_time = datetime.now().strftime("%Y-%m-%d")
+            if cached_activity := await self._warmup_market_privilege(current_time):
+                self.market_privilege_cache = cached_activity
+                self.logger.log(f"优享权益: 已预热缓存 {len(cached_activity.get('detailList', []))} 个权益")
+            await self._wait_market_privilege_start(start_time)
+        stagger_seconds = max(0, (self.index - 1) * MARKET_PRIVILEGE_STAGGER_SECONDS + random.uniform(0.01, 0.05))
         await asyncio.sleep(stagger_seconds)
-        current_time = now.strftime("%Y-%m-%d")
-        result = await self._market_privilege_post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/getActivitiesDetail", {"majorId": 3, "subCodeList": ["YOUCHOICEONE"], "currentTime": current_time, "withUserStatus": 1}, "获取活动详情")
-        if not isinstance(result, dict) or result.get("code") != 200: return self.logger.log(f"优享权益: 获取活动详情失败 {self._market_privilege_error(result)}")
-        if not (data_list := result.get("data", [])): return
-        activity = data_list[0]
+        current_time = datetime.now().strftime("%Y-%m-%d")
+        if self.market_privilege_cache:
+            self.logger.log("优享权益: 使用预热缓存执行解锁后领取")
+            if await self._claim_market_privilege(self.market_privilege_cache, current_time, ignore_stock=True, final_log=False): return
+        activity, result = await self._get_market_privilege_activity(current_time)
+        if not activity: return self.logger.log(f"优享权益: 获取活动详情失败 {self._market_privilege_error(result)}")
         if activity.get("userAvailableTimes", 0) <= 0: return self.logger.log("优享权益: 今日已领取")
-        if not (detail_list := activity.get("detailList", [])): return
-        available = [i for i in detail_list if int(i.get("leftQuantity", 0)) > 0]
-        if not available: return self.logger.log("优享权益: 所有权益均无库存")
-        surprise, normal = sorted([i for i in available if i.get("isSurprise") == 1], key=lambda x: int(x.get("sort", 0)), reverse=True), sorted([i for i in available if i.get("isSurprise") != 1], key=lambda x: int(x.get("sort", 0)), reverse=True)
-        act_id, act_code = activity.get("activityId"), activity.get("activityCode", "YOUCHOICEONE")
-        for item in surprise + normal:
-            name, pid, pcode = item.get("productName", ""), item.get("id"), item.get("productCode", "")
-            if item in surprise and item.get("isUnlock") == 0:
-                unlock_ok, unlock_result = await self._unlock_surprise_privilege(pid, act_code, name)
-                if not unlock_ok:
-                    self.logger.log(f"优享权益: [{name}] 解锁失败 {self._market_privilege_error(unlock_result)}")
-                    continue
-            receive_ok, receive_result = await self._receive_privilege(act_id, pid, pcode, item.get("channelId"), item.get("accountType", "4"), current_time, name)
-            if receive_ok: return self.logger.log(f"优享权益: [{name}] 领取成功!", notify=True)
-            self.logger.log(f"优享权益: [{name}] 领取失败 {self._market_privilege_error(receive_result)}")
-        self.logger.log("优享权益: 所有权益领取失败")
+        await self._claim_market_privilege(activity, current_time)
 
     def _market_privilege_error(self, result):
         if not result: return "请求失败"
@@ -614,33 +954,141 @@ class CustomUserService:
         code = result.get("code")
         return code in [500, 502, 503, 504] or "GATEWAY_TIMEOUT" in message or "TIMEOUT" in message
 
-    async def _market_privilege_post(self, url, payload, action_name, retries=MARKET_PRIVILEGE_MAX_RETRIES):
+    def _market_privilege_delay(self, attempt, retry_delays=None):
+        delays = retry_delays or MARKET_PRIVILEGE_RETRY_DELAYS
+        return delays[min(attempt - 1, len(delays) - 1)] + random.uniform(0.02, 0.08)
+
+    def _market_privilege_start_time(self, now=None):
+        current = now or datetime.now()
+        return current.replace(hour=MARKET_PRIVILEGE_START_HOUR, minute=0, second=0, microsecond=0)
+
+    async def _wait_market_privilege_start(self, start_time=None):
+        target = start_time or self._market_privilege_start_time()
+        while (remaining := (target - datetime.now()).total_seconds()) > 0:
+            await asyncio.sleep(min(remaining, 0.2))
+
+    def _market_privilege_items(self, detail_list, ignore_stock=False):
+        if not detail_list: return []
+        items = []
+        for item in detail_list:
+            if ignore_stock:
+                items.append(item)
+                continue
+            try: left_quantity = int(item.get("leftQuantity", 0) or 0)
+            except Exception: left_quantity = 0
+            if left_quantity > 0: items.append(item)
+        surprise = sorted([i for i in items if i.get("isSurprise") == 1], key=lambda x: int(x.get("sort", 0) or 0), reverse=True)
+        normal = sorted([i for i in items if i.get("isSurprise") != 1], key=lambda x: int(x.get("sort", 0) or 0), reverse=True)
+        return surprise + normal
+
+    def _market_privilege_already_done(self, result):
+        message = self._market_privilege_error(result)
+        return any(key in message for key in ["今日已领取", "您已领取", "已经领取", "已领取过", "已参与过活动"])
+
+    def _market_privilege_unlock_ready(self, result):
+        message = self._market_privilege_error(result)
+        return any(key in message for key in ["已解锁", "已经解锁", "无需解锁"])
+
+    async def _query_market_receive_record(self):
+        payload = {"isReceive": None, "receiveStatus": None, "limit": 20, "page": 1, "mobile": self.mobile, "businessSources": ["3", "4", "5", "6", "99", "88"], "isPromotion": 1, "returnFormatType": 1}
+        headers = {"Authorization": f"Bearer {self.market_token}", "Content-Type": "application/json", "Origin": "https://contact.bol.wo.cn", "Referer": "https://contact.bol.wo.cn/"}
+        try:
+            res = await self.http.post("https://backward.bol.wo.cn/prod-api/market/contactReceive/queryReceiveRecord", headers=headers, json=payload, timeout=MARKET_PRIVILEGE_RECORD_TIMEOUT, retries=1)
+            if isinstance(result := res["result"], dict) and result.get("code") == 200: return result
+        except Exception: pass
+        return None
+
+    async def _market_privilege_latest_record_today(self, product_name, current_time):
+        if not self.market_token or not self.mobile: return False, None
+        if not (result := await self._query_market_receive_record()): return False, None
+        if not (records := result.get("data", {}).get("recordObjs", [])): return False, None
+        latest = records[0]
+        receive_time, record_name, event_theme = str(latest.get("receiveTime", "") or ""), str(latest.get("recordName", "") or ""), str(latest.get("eventTheme", "") or "")
+        if receive_time.startswith(current_time) and record_name == product_name and event_theme == MARKET_PRIVILEGE_EVENT_THEME: return True, latest
+        return False, latest
+
+    async def _get_market_privilege_activity(self, current_time, action_name="获取活动详情", retries=MARKET_PRIVILEGE_MAX_RETRIES):
+        result = await self._market_privilege_post(
+            "https://backward.bol.wo.cn/prod-api/promotion/activity/roll/getActivitiesDetail",
+            {"majorId": 3, "subCodeList": ["YOUCHOICEONE"], "currentTime": current_time, "withUserStatus": 1},
+            action_name,
+            retries=retries,
+            timeout=MARKET_PRIVILEGE_DETAIL_TIMEOUT,
+        )
+        if isinstance(result, dict) and result.get("code") == 200 and (data_list := result.get("data", [])): return data_list[0], result
+        return None, result
+
+    async def _warmup_market_privilege(self, current_time):
+        activity, _ = await self._get_market_privilege_activity(current_time, action_name="预热获取活动详情", retries=2)
+        return activity
+
+    async def _claim_market_privilege(self, activity, current_time, ignore_stock=False, final_log=True):
+        if not activity: return False
+        if not (candidates := self._market_privilege_items(activity.get("detailList", []), ignore_stock=ignore_stock)):
+            if final_log: self.logger.log("优享权益: 所有权益均无库存")
+            return False
+        act_id, act_code = activity.get("activityId"), activity.get("activityCode", "YOUCHOICEONE")
+        item = candidates[0]
+        name, pid, pcode = item.get("productName", ""), item.get("id"), item.get("productCode", "")
+        if item.get("isSurprise") == 1 and item.get("isUnlock") == 0:
+            unlock_ok, unlock_result = await self._unlock_surprise_privilege(pid, act_code, name)
+            if not unlock_ok and not self._market_privilege_unlock_ready(unlock_result):
+                self.logger.log(f"优享权益: [{name}] 解锁失败 {self._market_privilege_error(unlock_result)}")
+                return False
+        receive_ok, receive_result = await self._receive_privilege(act_id, pid, pcode, item.get("channelId"), item.get("accountType", "4"), current_time, name)
+        if receive_ok: self.logger.log(f"优享权益: [{name}] 领取成功!", notify=True); return True
+        if self._market_privilege_already_done(receive_result):
+            self.logger.log(f"优享权益: [{name}] 今日已领取")
+            return True
+        self.logger.log(f"优享权益: [{name}] 领取失败 {self._market_privilege_error(receive_result)}")
+        if final_log: self.logger.log("优享权益: 首个权益领取失败")
+        return False
+
+    async def _market_privilege_post(self, url, payload, action_name, retries=MARKET_PRIVILEGE_MAX_RETRIES, timeout=MARKET_PRIVILEGE_ACTION_TIMEOUT, retry_delays=None):
         headers = {"Authorization": f"Bearer {self.market_token}", "Content-Type": "application/json", "Referer": "https://contact.bol.wo.cn/"}
         last_result = None
         for attempt in range(1, retries + 1):
             try:
-                res = await self.http.post(url, headers=headers, json=payload)
+                res = await self.http.post(url, headers=headers, json=payload, timeout=timeout, retries=1)
                 last_result = res["result"]
             except Exception:
                 last_result = None
             if isinstance(last_result, dict) and last_result.get("code") == 200: return last_result
             if attempt >= retries or not self._should_retry_market_privilege(last_result): return last_result
-            delay = min(15, attempt * 3 + random.uniform(0.5, 1.5))
+            delay = self._market_privilege_delay(attempt, retry_delays=retry_delays)
             self.logger.log(f"优享权益: {action_name}超时，第{attempt}次重试等待 {delay:.1f} 秒")
             await asyncio.sleep(delay)
         return last_result
 
     async def _unlock_surprise_privilege(self, product_id, activity_code, product_name=""):
         try:
-            result = await self._market_privilege_post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/unlock/surpriseInterest", {"timeVerRan": int(time.time() * 1000), "mobile": self.mobile, "id": product_id, "activityId": activity_code}, f"[{product_name}] 解锁")
+            result = await self._market_privilege_post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/unlock/surpriseInterest", {"timeVerRan": int(time.time() * 1000), "mobile": self.mobile, "id": product_id, "activityId": activity_code}, f"[{product_name}] 解锁", timeout=MARKET_PRIVILEGE_ACTION_TIMEOUT)
             return bool(result and result.get("code") == 200), result
         except: return False, None
 
     async def _receive_privilege(self, activity_id, product_id, product_code, channel_id, account_type, current_time, product_name=""):
-        try:
-            result = await self._market_privilege_post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/receiveRights", {"channelId": channel_id, "activityId": activity_id, "productId": product_id, "productCode": product_code, "currentTime": current_time, "accountType": account_type}, f"[{product_name}] 领取")
-            return bool(result and result.get("code") == 200), result
-        except: return False, None
+        headers = {"Authorization": f"Bearer {self.market_token}", "Content-Type": "application/json", "Referer": "https://contact.bol.wo.cn/"}
+        payload = {"channelId": channel_id, "activityId": activity_id, "productId": product_id, "productCode": product_code, "currentTime": current_time, "accountType": account_type}
+        last_result, last_record_check = None, time.monotonic()
+        for attempt in range(1, MARKET_PRIVILEGE_MAX_RETRIES + 1):
+            try:
+                res = await self.http.post("https://backward.bol.wo.cn/prod-api/promotion/activity/roll/receiveRights", headers=headers, json=payload, timeout=MARKET_PRIVILEGE_ACTION_TIMEOUT, retries=1)
+                last_result = res["result"]
+            except Exception:
+                last_result = None
+            if isinstance(last_result, dict) and last_result.get("code") == 200: return True, last_result
+            if self._market_privilege_already_done(last_result): return False, last_result
+            if (now := time.monotonic()) - last_record_check >= MARKET_PRIVILEGE_RECORD_CHECK_INTERVAL:
+                last_record_check = now
+                matched, latest = await self._market_privilege_latest_record_today(product_name, current_time)
+                if matched:
+                    self.logger.log(f"优享权益: [{product_name}] 最新领取记录显示今日已到账，终止重试")
+                    return True, {"code": 200, "msg": "queryReceiveRecord confirmed", "data": latest}
+            if attempt >= MARKET_PRIVILEGE_MAX_RETRIES or not self._should_retry_market_privilege(last_result): return False, last_result
+            delay = self._market_privilege_delay(attempt)
+            self.logger.log(f"优享权益: [{product_name}] 领取超时，第{attempt}次重试等待 {delay:.1f} 秒")
+            await asyncio.sleep(delay)
+        return False, last_result
 
     def _get_xj_month_activity_id(self):
         month_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
@@ -976,17 +1424,21 @@ class CustomUserService:
         else: self.logger.log("商都福利抽奖: 未中奖")
 
     async def user_task(self):
-        if not await self.online(): return
-        for task in [
-            self.sign_task,
-            self.xj_task,
-            self.ttlxj_task,
-            self.ltzf_task,
-            self.wostore_cloud_task,
-            self.market_task,
-            self.security_butler_task,
-            self.shangdu_task,
-        ]: await task()
+        try:
+            if not await self.online(): return
+            for task in [
+                self.pan_speed_task,
+                self.market_task,
+                self.sign_task,
+                self.xj_task,
+                self.ttlxj_task,
+                self.ltzf_task,
+                self.wostore_cloud_task,
+                self.security_butler_task,
+                self.shangdu_task,
+            ]: await task()
+        finally:
+            await self.http.close()
 
 async def main():
     start_time = datetime.now()

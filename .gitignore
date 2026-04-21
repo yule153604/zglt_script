@@ -1,3 +1,7 @@
 .claude/
 .vscode/
 __pycache__/
+.har
+token.md
+.log
+login.py
