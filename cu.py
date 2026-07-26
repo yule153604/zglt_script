@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import threading
 import random
 import re
 import string
@@ -139,17 +140,6 @@ UPHONE_H5_UA = (
     "(KHTML, like Gecko)  unicom{version:iphone_c@12.1300};ltst;OSVersion/27.0"
 )
 
-# 联通客户日（7月答题领密令抽奖 + 专区签到）
-# 活动窗约 7/19–7/25；act/ap 以页面配置为准，可用环境变量覆盖
-MDAY_OCP = "https://c.10010.com/ocp"
-MDAY_ENTRY = "https://c.10010.com/"
-MDAY_H5_UA = (
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Mobile/15E148 unicom{version:iphone_c@12.1300}"
-)
-MDAY_ACT_ID = os.environ.get("UNICOM_MDAY_ACT_ID", "769")
-MDAY_AP_ID = os.environ.get("UNICOM_MDAY_AP_ID", "2074786685580742656")
-
 
 def require_int(value, field, minimum=None):
     """必填业务整数：仅接受非 bool 的 int，或可由 int() 完整解析的 str；可选 minimum 下限。"""
@@ -269,6 +259,27 @@ def is_retryable_api_response(r) -> bool:
     return False
 
 
+NOTIFY_LINES = []
+
+
+def notify_send(title, content):
+    # notify.py 的一言接口无超时、推送线程 join 也无超时，必须隔离，否则会卡死青龙任务槽
+    os.environ.setdefault("HITOKOTO", "false")
+
+    def _send():
+        try:
+            from notify import send
+            send(title, content)
+        except Exception as e:
+            print(f"推送失败: {e}")
+
+    worker = threading.Thread(target=_send, daemon=True)
+    worker.start()
+    worker.join(timeout=30)
+    if worker.is_alive():
+        print("推送超时 30s，放弃等待")
+
+
 def iter_set_cookies(headers: httpx.Headers | Mapping[str, object]):
     """逐条产出 Set-Cookie 值，避免按逗号拆分误伤 Expires 日期。"""
     if isinstance(headers, httpx.Headers):
@@ -295,13 +306,13 @@ class Unicom:
         self.xj_token = self.wocare_token = self.wocare_sid = ""
         self.sec_ticket = self.sec_token = self.sec_jea_id = self.sec_key = ""
         self.session_id = self.token_id = self.rpt_id = ""
-        self.ttlxj_auth_info = None
         self.ttxc_token = self.ttxc_nick_name = self.ttxc_user_id = ""
         self.ttxc_newbie_list = []
         self.ttxc_charge_level = {}
+        self.ttxc_no_energy = False
         self.battle_page_referer = ""
+        self.last_ticket_url = ""
         self.uphone_cp_token = self.uphone_usr_token = self.uphone_device_id = ""
-        self.mday_token = ""
 
         # 生成UUID用于签到
         self.uuid = str(uuid.uuid4())
@@ -326,10 +337,14 @@ class Unicom:
             self.client.cookies.set(n, v, domain=".10010.com")
 
     def log(self, msg):
-        print(f"[{datetime.now():%H:%M:%S}] [账号{self.idx}] {msg}", flush=True)
+        line = f"[{datetime.now():%H:%M:%S}] [账号{self.idx}] {msg}"
+        print(line, flush=True)
+        NOTIFY_LINES.append(line)
 
     def task_log(self, tag, msg):
-        print(f"[{datetime.now():%H:%M:%S}] [账号{self.idx}] [{tag}] {msg}", flush=True)
+        line = f"[{datetime.now():%H:%M:%S}] [账号{self.idx}] [{tag}] {msg}"
+        print(line, flush=True)
+        NOTIFY_LINES.append(line)
 
     def tlog(self, msg):
         tag = getattr(self, "_task_tag", None)
@@ -389,6 +404,8 @@ class Unicom:
             allow_redirects=False,
         )
         if loc := r["headers"].get("location") or r["headers"].get("Location"):
+            # 完整落地页 URL 留给调用方当 Referer（woauth2 授权有 referer 校验）
+            self.last_ticket_url = loc
             return parse_qs(urlparse(loc).query).get("ticket", [""])[0]
         return ""
 
@@ -1243,10 +1260,16 @@ class Unicom:
                     json={},
                 )
                 res = require_dict_data(r, "抽奖")
-                if res.get("code") == 200:
-                    data = res.get("data", {})
-                    if data.get("isWinning") and (prize := data.get("prizesName")):
-                        self.tlog(f"抽奖: {prize}")
+                if res.get("code") != 200:
+                    self.tlog(
+                        f"抽奖失败: code={res.get('code')} {response_summary(res)}"
+                    )
+                    break
+                data = res.get("data", {})
+                if data.get("isWinning") and (prize := data.get("prizesName")):
+                    self.tlog(f"抽奖: {prize}")
+                else:
+                    self.tlog("抽奖: 未中奖")
         except Exception as e:
             self.tlog_exc(e, "抽奖")
 
@@ -1257,243 +1280,234 @@ class Unicom:
             await self.market_privilege()
             await self.market_raffle()
 
-    # === 3. 天天领现金（立减金打卡） ===
-    TTLXJ_CLOCK_URL = (
+    # === 3. 天天领现金 ===
+    TTLXJ_PAGE = (
         "https://epay.10010.com/ci-mcss-party-web/clockIn/"
-        "?bizFrom=225&bizChannelCode=225"
+        "?bizFrom=225&bizChannelCode=225&channelType=QBSZ"
     )
 
-    def _ttlxj_bizchannel(self, rpt_id=""):
-        return json.dumps(
-            {
-                "bizChannelCode": "225",
-                "disriBiz": "party",
-                "unionSessionId": "",
-                "stType": "",
-                "stDesmobile": "",
-                "source": "",
-                "rptId": rpt_id or self.rpt_id or "",
-                "ticket": "",
-                "tongdunTokenId": "",
-                "xindunTokenId": "",
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+    def ttlxj_bizinfo(self):
+        """party 域接口的鉴权头。
 
-    def _ttlxj_headers(self):
+        除 bizChannelInfo 外，业务接口还必须带 auth/check 换回的 authInfo + tokenid，
+        否则服务端回 11019006 这类 popup 拒绝信封（无业务数据）。
         """
-        H5 axios 拦截器等价头：
-          bizChannelInfo = JSON
-          authInfo = 完整 authInfo 对象 JSON（不是裸 sessionId）
-          tokenid = tokenId
-        """
+        ref = self.TTLXJ_PAGE + (f"&rptid={self.rpt_id}" if self.rpt_id else "")
         h = {
-            "Referer": self.TTLXJ_CLOCK_URL,
+            "bizchannelinfo": json.dumps(
+                {
+                    "bizChannelCode": "225",
+                    "disriBiz": "party",
+                    "unionSessionId": "",
+                    "stType": "",
+                    "stDesmobile": "",
+                    "source": "",
+                    "rptId": self.rpt_id,
+                    "ticket": "",
+                    "tongdunTokenId": "",
+                    "xindunTokenId": "",
+                }
+            ),
+            "Referer": ref,
             "Origin": "https://epay.10010.com",
-            "bizChannelInfo": self._ttlxj_bizchannel(),
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         }
-        auth = getattr(self, "ttlxj_auth_info", None)
-        if isinstance(auth, dict) and auth:
-            h["authInfo"] = json.dumps(auth, ensure_ascii=False, separators=(",", ":"))
-            if auth.get("tokenId"):
-                h["tokenid"] = str(auth.get("tokenId"))
-        elif self.token_id:
+        if self.token_id:
             h["tokenid"] = self.token_id
+            h["authInfo"] = json.dumps(
+                {
+                    "accessToken": None,
+                    "mobile": "",
+                    "sessionId": self.session_id or self.token_id,
+                    "stOpenDate": None,
+                    "tokenId": self.token_id,
+                    "userId": "",
+                }
+            )
         return h
 
-    async def _ttlxj_auth_check(self, rpt_id=""):
-        return await self.req(
+    async def ttlxj_task(self):
+        self._task_tag = "天天领现金"
+        self.tlog("开始")
+        ticket_info = await self.get_ticket(
+            "https://epay.10010.com/ci-mps-st-web/?webViewNavIsHidden=webViewNavIsHidden"
+        )
+        if not ticket_info:
+            self.tlog("获取ticket失败")
+            return
+
+        # 先载入带 ticket 的落地页，再以它作 Referer 换 rptid；
+        # 缺 Referer 时 authorize 返回 HTTP 200 但体内 status=400 bad referer
+        st_referer = self.last_ticket_url or (
+            "https://epay.10010.com/ci-mps-st-web/?webViewNavIsHidden=webViewNavIsHidden"
+        )
+        await self.req("GET", st_referer)
+
+        # 授权
+        r = await self.req(
+            "POST",
+            "https://epay.10010.com/woauth2/v2/authorize",
+            headers={
+                "Referer": st_referer,
+                "Origin": "https://epay.10010.com",
+                "Accept": "application/json",
+            },
+            json={
+                "response_type": "rptid",
+                "client_id": "73b138fd-250c-4126-94e2-48cbcc8b9cbe",
+                "redirect_uri": "https://epay.10010.com/ci-mps-st-web/",
+                "login_hint": {
+                    "credential_type": "st_ticket",
+                    "credential": ticket_info,
+                    "st_type": "02",
+                    "force_logout": True,
+                    "source": "app_sjyyt",
+                },
+                "device_info": {
+                    "token_id": f"chinaunicom-pro-{int(time.time() * 1000)}-{''.join(random.choices(string.ascii_letters + string.digits, k=13))}",
+                    "trace_id": "".join(
+                        random.choices(string.ascii_letters + string.digits, k=32)
+                    ),
+                },
+            },
+        )
+        # authorize 失败时 HTTP 仍为 200，判据在响应体的 status/rptid
+        auth_res = r["data"] if isinstance(r["data"], dict) else {}
+        if r["code"] != 200 or safe_int(auth_res.get("status"), -1) != 200:
+            self.tlog(
+                f"授权失败: {auth_res.get('message') or auth_res.get('ext_code') or ''} "
+                f"{api_response_err(r, 'authorize')}"
+            )
+            return
+        # 注意：authorize 返回的 rptid 属于 ci-mps-st-web 客户端，拿去 party 域
+        # 会被判 invalid audience；clockIn 用的 rptid 要走下面的 woauth2/login 重定向拿。
+        # 这里 authorize 的作用只是建立 woauth2 会话 cookie。
+
+        # 先加载活动页，让服务端把 clockIn 作为 referWoauthUrl 写进会话，
+        # 否则下一步 auth/check 返回的 woauth_login_url 不带 redirect_url
+        await self.req("GET", self.TTLXJ_PAGE)
+
+        # 认证检查
+        r = await self.req(
             "POST",
             "https://epay.10010.com/ps-pafs-auth-front/v1/auth/check",
-            headers={
-                "bizchannelinfo": self._ttlxj_bizchannel(rpt_id),
-                "Referer": self.TTLXJ_CLOCK_URL,
-                "Origin": "https://epay.10010.com",
-            },
+            headers=self.ttlxj_bizinfo(),
             json={},
         )
 
-    async def _ttlxj_woauth_rptid(self, login_url: str) -> str:
-        """
-        走 woauth2/login HTML → after-collected-device-digest 跳转链，
-        从最终 Location 提取 party 体系 rptid（与 ttxc_finish_woauth 同源，但保留 rptid）。
-        """
-        headers = {"Referer": "https://epay.10010.com/", "User-Agent": TTXC_UA}
-        r = await self.req("GET", login_url, headers=headers)
-        text = r["data"] if isinstance(r.get("data"), str) else ""
-        match = re.search(r'var token = "([^"]+)"', text)
-        if not match:
-            self.tlog("woauth 登录页无 token")
-            return ""
-        next_url = (
-            "https://epay.10010.com/woauth2/after-collected-device-digest"
-            f"?deviceDigestTraceId=&deviceDigestTokenId=&token={quote(match.group(1))}"
-            f"&source=app_sjyyt"
-        )
-        referer = login_url
-        rptid = ""
-        for _ in range(8):
-            r = await self.req(
-                "GET",
-                next_url,
-                allow_redirects=False,
-                headers={"Referer": referer, "User-Agent": TTXC_UA},
-            )
-            loc = r["headers"].get("location") or r["headers"].get("Location") or ""
-            if not loc:
-                break
-            if loc.startswith("/"):
-                loc = "https://epay.10010.com" + loc
-            q = parse_qs(urlparse(loc).query)
-            if q.get("rptid"):
-                rptid = q["rptid"][0]
-            elif q.get("rptId"):
-                rptid = q["rptId"][0]
-            referer, next_url = next_url, loc
-        return rptid
-
-    async def ttlxj_task(self):
-        """
-        天天领立减金打卡。
-
-        对照 H5 clockIn 与 issue #11（显示已打卡实际没有）:
-          1) party 登录：auth/check → woauth 跳转链拿 rptid → 再 auth/check
-             （旧逻辑用 st-web client 的 rptid 会 invalid audience；
-              未登录时 userDrawInfo 仍 code=0000 但无 day 字段，旧代码误报「已打卡」）
-          2) 业务头 authInfo 必须是完整 JSON 对象字符串
-          3) Mon–Sat: dayN=="1" 可打；"0"=hasGot；周日看 haveGF=="1"
-        """
-        self._task_tag = "天天领现金"
-        self.tlog("开始")
-        self.ttlxj_auth_info = None
-        try:
-            # 1) 未登录 auth/check → 拿 party 的 woauth_login_url
-            r = await self._ttlxj_auth_check("")
-            res = r.get("data")
-            if not isinstance(res, dict):
+        res = r["data"]
+        if not isinstance(res, dict):
+            self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
+            return
+        if str(res.get("code")) == "0000":
+            data = res.get("data")
+            auth = data.get("authInfo") if isinstance(data, dict) else None
+            if not isinstance(auth, dict):
                 self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
                 return
-
-            if str(res.get("code")) == "0000":
-                data = res.get("data") if isinstance(res.get("data"), dict) else {}
-                auth = (
-                    data.get("authInfo")
-                    if isinstance(data.get("authInfo"), dict)
-                    else None
-                )
-            elif str(res.get("code")) == "2101000100":
-                data = res.get("data") if isinstance(res.get("data"), dict) else {}
-                login_url = str(data.get("woauth_login_url") or "")
-                if not login_url:
-                    self.tlog(
-                        f"认证失败(需登录无url): {api_response_err(r, 'auth/check')}"
-                    )
-                    return
-                rptid = await self._ttlxj_woauth_rptid(login_url)
-                if not rptid:
-                    self.tlog("获取 rptid 失败")
-                    return
-                self.rpt_id = rptid
-                r = await self._ttlxj_auth_check(rptid)
-                res = r.get("data")
-                if not isinstance(res, dict) or str(res.get("code")) != "0000":
-                    self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
-                    return
-                data = res.get("data") if isinstance(res.get("data"), dict) else {}
-                auth = (
-                    data.get("authInfo")
-                    if isinstance(data.get("authInfo"), dict)
-                    else None
-                )
-            else:
+            self.session_id, self.token_id = (
+                auth.get("sessionId"),
+                auth.get("tokenId"),
+            )
+        elif str(res.get("code")) == "2101000100":
+            # 需要登录获取rptId
+            data = res.get("data")
+            if not isinstance(data, dict):
                 self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
                 return
-
-            if not isinstance(auth, dict) or not auth.get("sessionId"):
-                self.tlog("认证失败: 无 authInfo.sessionId")
-                return
-            self.ttlxj_auth_info = auth
-            self.session_id = str(auth.get("sessionId") or "")
-            self.token_id = str(auth.get("tokenId") or "")
-
-            # 2) 查询打卡状态
-            r = await self.req(
-                "POST",
-                "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/userDrawInfo",
-                headers=self._ttlxj_headers(),
-                data={},
-            )
-            res = r.get("data")
-            if not isinstance(res, dict) or str(res.get("code")) != "0000":
-                self.tlog(f"查询失败: {api_response_err(r, 'userDrawInfo')}")
-                return
-            data = res.get("data") if isinstance(res.get("data"), dict) else {}
-            rc = str(data.get("returnCode") or "")
-            if rc != "0":
-                self.tlog(
-                    f"查询失败: returnCode={rc or '(空)'} "
-                    f"msg={data.get('returnMsg') or res.get('msg')}"
+            login_url = data.get("woauth_login_url")
+            if login_url:
+                # 服务端通常已把 redirect_url 填好；只有留空时才由我们补上活动页，
+                # 否则直接拼接会污染已编码的 redirect_url 参数
+                full_url = (
+                    f"{login_url}{quote(self.TTLXJ_PAGE, safe='')}"
+                    if login_url.endswith("redirect_url=")
+                    else login_url
                 )
-                return
-            if "dayOfWeek" not in data:
-                self.tlog(f"查询失败: 无 dayOfWeek {str(data)[:160]}")
-                return
-
-            day_of_week = safe_int(data.get("dayOfWeek"), 0)
-            day_key = f"day{day_of_week}"
-            day_flag = str(data.get(day_key) or "")
-            have_gf = str(data.get("haveGF") or "")
-            # H5 ableToDraw
-            if day_of_week == 7:
-                can_draw = have_gf == "1"
-            else:
-                can_draw = day_flag == "1"
-
-            self.tlog(
-                f"状态 dayOfWeek={day_of_week} {day_key}={day_flag} "
-                f"haveGF={have_gf} weekDrawTimes={data.get('weekDrawTimes')} "
-                f"countAmount={data.get('countAmount')}"
-            )
-
-            if not can_draw:
-                # day/haveGF 为 0 表示 hasGot；其它异常值单独说明
-                if day_of_week == 7:
-                    self.tlog("周日已瓜分或未达瓜分条件" if have_gf != "1" else "不可打卡")
+                r = await self.req("GET", full_url, allow_redirects=False)
+                if loc := r["headers"].get("location") or r["headers"].get("Location"):
+                    if rptid := parse_qs(urlparse(loc).query).get("rptid", [""])[0]:
+                        self.rpt_id = rptid
+                        # 重新认证
+                        r = await self.req(
+                            "POST",
+                            "https://epay.10010.com/ps-pafs-auth-front/v1/auth/check",
+                            headers=self.ttlxj_bizinfo(),
+                            json={},
+                        )
+                        res = r["data"]
+                        if not isinstance(res, dict) or str(res.get("code")) != "0000":
+                            self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
+                            return
+                        data = res.get("data")
+                        auth = data.get("authInfo") if isinstance(data, dict) else None
+                        if not isinstance(auth, dict):
+                            self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
+                            return
+                        self.session_id, self.token_id = (
+                            auth.get("sessionId"),
+                            auth.get("tokenId"),
+                        )
+                    else:
+                        self.tlog("登录重定向缺少rptid")
+                        return
                 else:
-                    self.tlog("已打卡" if day_flag == "0" else f"不可打卡({day_key}={day_flag})")
-                return
-
-            draw_type = "C" if day_of_week == 7 else "B"
-            r = await self.req(
-                "POST",
-                "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/unifyDrawNew",
-                headers=self._ttlxj_headers(),
-                data={
-                    "drawType": draw_type,
-                    "bizFrom": "225",
-                    "activityId": "TTLXJ20210330",
-                },
-            )
-            res = r.get("data")
-            if not isinstance(res, dict):
-                self.tlog(f"打卡失败: {api_response_err(r, 'unifyDrawNew')}")
-                return
-            body = res.get("data") if isinstance(res.get("data"), dict) else {}
-            if str(res.get("code")) == "0000" and str(body.get("returnCode")) == "0":
-                amt = body.get("amount")
-                tip = str(body.get("awardTipContent") or "打卡成功")
-                self.tlog(tip.replace("xx", str(amt)))
+                    self.tlog(f"登录重定向缺少Location: {api_response_err(r, 'woauth2/login')}")
+                    return
             else:
+                self.tlog("认证响应缺少woauth_login_url")
+                return
+        else:
+            self.tlog(f"认证失败: {api_response_err(r, 'auth/check')}")
+            return
+
+        # 查询打卡状态
+        r = await self.req(
+            "POST",
+            "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/userDrawInfo",
+            headers=self.ttlxj_bizinfo(),
+        )
+        if (res := r["data"]) and str(res.get("code")) == "0000":
+            data = res.get("data", {})
+            # 会话无效时服务端回的是 popup 拒绝信封（无 day 日历字段），须先识别
+            if str(data.get("returnCode")) != "0":
                 self.tlog(
-                    f"打卡失败: returnCode={body.get('returnCode')} "
-                    f"msg={body.get('returnMsg') or res.get('msg')}"
+                    f"查询打卡状态被拒[{data.get('returnCode')}]: "
+                    f"{data.get('returnMsg') or json.dumps(data, ensure_ascii=False)[:150]}"
                 )
-        except Exception as e:
-            self.tlog_exc(e, "ttlxj_task")
-        finally:
-            self.tlog("结束")
-            self._task_tag = None
+                return
+            day_key = f"day{data.get('dayOfWeek')}"
+            if data.get(day_key) == "1":
+                draw_type = "C" if (datetime.now().weekday() + 1) % 7 == 0 else "B"
+                r = await self.req(
+                    "POST",
+                    "https://epay.10010.com/ci-mcss-party-front/v1/ttlxj/unifyDrawNew",
+                    headers=self.ttlxj_bizinfo(),
+                    data={
+                        "drawType": draw_type,
+                        "bizFrom": "225",
+                        "activityId": "TTLXJ20210330",
+                    },
+                )
+                if (
+                    (res := r["data"])
+                    and str(res.get("code")) == "0000"
+                    and str(res.get("data", {}).get("returnCode")) == "0"
+                ):
+                    amt = res["data"].get("amount")
+                    self.tlog(
+                        f"{res['data'].get('awardTipContent', '').replace('xx', str(amt))}"
+                    )
+                else:
+                    self.tlog(f"抽奖失败: {api_response_err(r, 'unifyDrawNew')}")
+            else:
+                # 实测：可抽时 day{dayOfWeek}=="1"，抽完即翻为 "0"
+                self.tlog(
+                    f"今日已抽过 {day_key}={data.get(day_key)!r} "
+                    f"周内已抽={data.get('weekDrawTimes')} 累计={data.get('countAmount')}元"
+                )
 
     # === 4. 联通祝福 ===
     def wocare_decode(self, result):
@@ -1521,6 +1535,43 @@ class Unicom:
         result.update(decoded)
         return result
 
+    def wocare_body(self, api, data):
+        ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
+        body = {
+            "version": WOCARE_CH[3],
+            "apiCode": api,
+            "channelId": WOCARE_CH[0],
+            "transactionId": ts + "".join(random.choices(string.digits, k=6)),
+            "timeStamp": ts,
+            "messageContent": base64.b64encode(
+                json.dumps(data, separators=(",", ":")).encode()
+            ).decode(),
+        }
+        sign_str = (
+            "&".join(f"{k}={body[k]}" for k in sorted(body))
+            + f"&sign={WOCARE_CH[1]}"
+        )
+        body["sign"] = hashlib.md5(sign_str.encode()).hexdigest()
+        return body
+
+    async def wocare_post(self, api, data, retries=3):
+        # wocare 服务端 7 月起变慢，默认 50s 超时会拖死任务，改短超时+重试
+        for i in range(retries):
+            r = await self.req(
+                "POST",
+                f"https://wocare.unisk.cn/api/v1/{api}",
+                data=self.wocare_body(api, data),
+                timeout=15,
+            )
+            if is_retryable_api_response(r) and i < retries - 1:
+                # 措辞避开"失败/异常"，否则重试成功也会被推送过滤器当成故障
+                self.tlog(
+                    f"{api} 第{i + 1}/{retries}次未响应，重试: {api_response_err(r, api)}"
+                )
+                await asyncio.sleep(1.5 * (i + 1))
+                continue
+            return self.wocare_decode(require_dict_data(r, api))
+
     async def ltzf_task(self):
         self._task_tag = "联通祝福"
         self.tlog("开始")
@@ -1528,6 +1579,7 @@ class Unicom:
             f"https://wocare.unisk.cn/mbh/getToken?channelType={WOCARE_CH[2]}&homePage=home&duanlianjieabc=qAz2m"
         )
         if not ticket:
+            self.tlog("获取ticket失败")
             return
 
         # 获取sid和token
@@ -1559,64 +1611,36 @@ class Unicom:
             if not self.wocare_sid:
                 self.wocare_sid = parse_qs(urlparse(loc).query).get("uuid", [""])[0]
             if not self.wocare_sid:
+                self.tlog("重定向缺少sid/uuid")
                 return
 
             # 登录
-            def wocare_body(api, data):
-                ts = datetime.now().strftime("%Y%m%d%H%M%S%f")[:-3]
-                body = {
-                    "version": WOCARE_CH[3],
-                    "apiCode": api,
-                    "channelId": WOCARE_CH[0],
-                    "transactionId": ts + "".join(random.choices(string.digits, k=6)),
-                    "timeStamp": ts,
-                    "messageContent": base64.b64encode(
-                        json.dumps(data, separators=(",", ":")).encode()
-                    ).decode(),
-                }
-                sign_str = (
-                    "&".join(f"{k}={body[k]}" for k in sorted(body))
-                    + f"&sign={WOCARE_CH[1]}"
-                )
-                body["sign"] = hashlib.md5(sign_str.encode()).hexdigest()
-                return body
-
-            r = await self.req(
-                "POST",
-                "https://wocare.unisk.cn/api/v1/loginmbh",
-                data=wocare_body(
-                    "loginmbh",
-                    {
-                        "sid": self.wocare_sid,
-                        "channelType": WOCARE_CH[2],
-                        "apiCode": "loginmbh",
-                    },
-                ),
+            res = await self.wocare_post(
+                "loginmbh",
+                {
+                    "sid": self.wocare_sid,
+                    "channelType": WOCARE_CH[2],
+                    "apiCode": "loginmbh",
+                },
             )
-            res = self.wocare_decode(require_dict_data(r, "loginmbh"))
             if str(res.get("resultCode")) == "0000":
-                self.wocare_token = res.get("data", {}).get("token")
+                self.wocare_token = (res.get("data") or {}).get("token")
                 if not self.wocare_token:
+                    self.tlog("登录响应缺少token")
                     return
                 self.tlog("登录成功")
 
                 # 获取动态Banner列表
-                r = await self.req(
-                    "POST",
-                    "https://wocare.unisk.cn/api/v1/getSpecificityBanner",
-                    data=wocare_body(
-                        "getSpecificityBanner",
-                        {
-                            "token": self.wocare_token,
-                            "apiCode": "getSpecificityBanner",
-                        },
-                    ),
+                res = await self.wocare_post(
+                    "getSpecificityBanner",
+                    {
+                        "token": self.wocare_token,
+                        "apiCode": "getSpecificityBanner",
+                    },
                 )
-
-                res = self.wocare_decode(require_dict_data(r, "getSpecificityBanner"))
-                if not isinstance(res, dict) or str(res.get("resultCode")) != "0000":
+                if str(res.get("resultCode")) != "0000":
                     self.tlog(
-                        f"接口失败: {api_response_err(r, 'getSpecificityBanner')}"
+                        f"接口失败: getSpecificityBanner resultCode={res.get('resultCode')} {res.get('resultMsg') or res.get('resultDesc') or ''}"
                     )
                     return
 
@@ -1625,7 +1649,7 @@ class Unicom:
                     raw_data = []
                 elif not isinstance(raw_data, list):
                     self.tlog(
-                        f"接口失败: 响应data格式错误 | {api_response_err(r, 'getSpecificityBanner')}"
+                        f"接口失败: getSpecificityBanner 响应data格式错误(type={type(raw_data).__name__})"
                     )
                     return
 
@@ -1644,10 +1668,8 @@ class Unicom:
                 # 执行任务和抽奖
                 for activity in banner_list:
                     await asyncio.sleep(1)
-                    r = await self.req(
-                        "POST",
-                        "https://wocare.unisk.cn/api/v1/loadInit",
-                        data=wocare_body(
+                    try:
+                        res = await self.wocare_post(
                             "loadInit",
                             {
                                 "token": self.wocare_token,
@@ -1655,34 +1677,30 @@ class Unicom:
                                 "type": activity["id"],
                                 "apiCode": "loadInit",
                             },
-                        ),
-                    )
-                    res = self.wocare_decode(require_dict_data(r, "loadInit"))
-                    if str(res.get("resultCode")) == "0000":
-                        data = res.get("data", {}) or {}
-                        group_id = data.get("zActiveModuleGroupId") or 0
-                        aid = activity["id"]
+                        )
+                        if str(res.get("resultCode")) == "0000":
+                            data = res.get("data", {}) or {}
+                            group_id = data.get("zActiveModuleGroupId") or 0
+                            aid = activity["id"]
 
-                        # 计算抽奖次数
-                        if aid == 2:
-                            is_partake = data.get("data", {}).get("isPartake") or 0
-                            count = 0 if is_partake else 1
-                        elif aid == 3:
-                            count = int(data.get("raffleCountValue", 0) or 0)
-                        elif aid == 4:
-                            count = int(data.get("mhRaffleCountValue", 0) or 0)
-                        else:
-                            count = 0
+                            # 计算抽奖次数
+                            if aid == 2:
+                                is_partake = (data.get("data") or {}).get("isPartake") or 0
+                                count = 0 if is_partake else 1
+                            elif aid == 3:
+                                count = int(data.get("raffleCountValue", 0) or 0)
+                            elif aid == 4:
+                                count = int(data.get("mhRaffleCountValue", 0) or 0)
+                            else:
+                                count = 0
 
-                        if count > 0:
-                            self.tlog(f"{activity.get('name', '')}: 可抽奖{count}次")
-                            # 执行抽奖
-                            for _ in range(count):
-                                await asyncio.sleep(2)
-                                r = await self.req(
-                                    "POST",
-                                    "https://wocare.unisk.cn/api/v1/luckDraw",
-                                    data=wocare_body(
+                            if count > 0:
+                                self.tlog(f"{activity.get('name', '')}: 可抽奖{count}次")
+                                # 执行抽奖；触发"频繁"风控时该次不计数，重试同一次
+                                done = retry = 0
+                                while done < count:
+                                    await asyncio.sleep(random.uniform(3, 5))
+                                    res = await self.wocare_post(
                                         "luckDraw",
                                         {
                                             "token": self.wocare_token,
@@ -1691,41 +1709,56 @@ class Unicom:
                                             "type": aid,
                                             "apiCode": "luckDraw",
                                         },
-                                    ),
-                                )
-                                res = self.wocare_decode(
-                                    require_dict_data(r, "luckDraw")
-                                )
-                                if str(res.get("resultCode")) == "0000":
-                                    draw_data = res.get("data", {}) or {}
-                                    draw_code = str(draw_data.get("resultCode", "-1"))
-                                    if draw_code == "0000":
-                                        prize = draw_data.get("data", {}).get(
-                                            "prize", {}
-                                        )
-                                        if pn := prize.get("prizeName"):
-                                            pd = prize.get("prizeDesc", "")
-                                            self.tlog(
-                                                f"{activity.get('name', '')}: {pn}[{pd}]"
-                                            )
-                                    else:
-                                        msg = (
-                                            draw_data.get("resultMsg")
-                                            or draw_data.get("resultDesc")
-                                            or res.get("resultMsg")
-                                            or res.get("resultDesc")
-                                            or ""
-                                        )
-                                        if msg.lower() == "success":
-                                            self.tlog(
-                                                f"{activity.get('name', '')}: 未中奖"
-                                            )
+                                    )
+                                    if str(res.get("resultCode")) == "0000":
+                                        draw_data = res.get("data", {}) or {}
+                                        draw_code = str(draw_data.get("resultCode", "-1"))
+                                        if draw_code == "0000":
+                                            prize = (
+                                                draw_data.get("data") or {}
+                                            ).get("prize") or {}
+                                            if pn := prize.get("prizeName"):
+                                                pd = prize.get("prizeDesc", "")
+                                                self.tlog(
+                                                    f"{activity.get('name', '')}: {pn}[{pd}]"
+                                                )
                                         else:
-                                            self.tlog(
-                                                f"{activity.get('name', '')}: {msg if msg else '抽奖完成'}"
+                                            msg = (
+                                                draw_data.get("resultMsg")
+                                                or draw_data.get("resultDesc")
+                                                or res.get("resultMsg")
+                                                or res.get("resultDesc")
+                                                or ""
                                             )
-                        else:
-                            self.tlog(f"{activity.get('name', '')}: 今日已无抽奖机会")
+                                            if "频繁" in msg and retry < 3:
+                                                retry += 1
+                                                self.tlog(
+                                                    f"{activity.get('name', '')}: {msg}，5秒后重试"
+                                                )
+                                                await asyncio.sleep(5)
+                                                continue
+                                            if msg.lower() == "success":
+                                                self.tlog(
+                                                    f"{activity.get('name', '')}: 未中奖"
+                                                )
+                                            else:
+                                                self.tlog(
+                                                    f"{activity.get('name', '')}: {msg if msg else '抽奖完成'}"
+                                                )
+                                    done += 1
+                                    retry = 0
+                            else:
+                                self.tlog(f"{activity.get('name', '')}: 今日已无抽奖机会")
+                    except (ValueError, AttributeError, TypeError, KeyError) as e:
+                        # 单个 banner 的畸形响应不能拖垮后面的 banner
+                        self.tlog_exc(e, activity.get("name") or "banner")
+                        continue
+            else:
+                self.tlog(
+                    f"登录失败: loginmbh resultCode={res.get('resultCode')} {res.get('resultMsg') or res.get('resultDesc') or ''}"
+                )
+        else:
+            self.tlog(f"获取sid失败: {api_response_err(r, 'getToken')}")
 
     # === 5. 新疆联通 ===
     async def xj_task(self):
@@ -2525,9 +2558,12 @@ class Unicom:
         plant_id = plant_id or await self.ttxc_get_plant_id()
         if not plant_id or not land_index:
             return None
-        await self.ttxc_post(
+        buy = await self.ttxc_post(
             "/client/v1/plant/buy", {"plantId": plant_id, "gameCfgId": ""}
         )
+        if buy.get("code") != 0:
+            self.tlog(f"购买种子失败[{buy.get('code')}]: {buy.get('msg', '')}")
+            return None
         data = await self.ttxc_post(
             "/plant/v1/planting", {"landIndex": land_index, "plantId": plant_id}
         )
@@ -2581,6 +2617,8 @@ class Unicom:
         self.tlog(
             f"地块{land_index}充能失败[{data.get('code')}]: {data.get('msg', '')}"
         )
+        if "余额不足" in str(data.get("msg", "")):
+            self.ttxc_no_energy = True
         return None
 
     async def ttxc_harvest_and_replant(self, land):
@@ -2596,6 +2634,8 @@ class Unicom:
             return
         charged = 0
         while current.get("status") == 3 and charged < TTXC_GROW_MAX_CHARGE_PER_LAND:
+            if self.ttxc_no_energy:
+                return
             current = await self.ttxc_charge_land(current)
             if not current:
                 return
@@ -2618,6 +2658,8 @@ class Unicom:
 
     async def ttxc_complete_charge_task(self, active, remaining):
         while remaining > 0:
+            if self.ttxc_no_energy:
+                return
             immature = [
                 land
                 for land in active
@@ -2628,7 +2670,7 @@ class Unicom:
                 return
             progressed = False
             for land in immature:
-                if remaining <= 0:
+                if remaining <= 0 or self.ttxc_no_energy:
                     return
                 result = await self.ttxc_charge_land(land)
                 if result:
@@ -2679,6 +2721,8 @@ class Unicom:
             return
         charged = 0
         for i, land in enumerate(active[:need_land]):
+            if self.ttxc_no_energy:
+                break
             result = await self.ttxc_charge_land(land)
             if result:
                 active[i] = result
@@ -3404,10 +3448,12 @@ class Unicom:
         if times is None:
             return
         if times <= 0:
-            if not await self.battle_upload_file():
-                return
-            if not await self.battle_province_ranking():
-                return
+            if await self.battle_upload_file():
+                if not await self.battle_province_ranking():
+                    return
+            else:
+                # 服务端可能已收到上传（60s ReadTimeout 后仍计数），不能直接放弃
+                self.battle_log("上传疑似超时，仍尝试查询抽奖次数")
             times = await self.battle_wait_lottery_times()
             if times is None or times <= 0:
                 return
@@ -3563,22 +3609,8 @@ class Unicom:
         return nested if isinstance(nested, dict) else None
 
     async def uphone_sign(self):
-        r = await self.req(
-            "GET",
-            f"{UPHONE_H5API}/activity-service/points/v1/sign/history",
-            headers=self.uphone_h5_headers(),
-            params={"activityCode": UPHONE_ACT_SIGN},
-        )
-        body = self.uphone_biz_data(r)
-        hist = body.get("data") if body and self.uphone_biz_ok(body) else None
-        records = hist.get("signRecords") if isinstance(hist, dict) else None
-        today = records[0] if isinstance(records, list) and records else {}
-        if not isinstance(today, dict):
-            today = {}
-        # signStatus=0 已签，1 未签
-        if today.get("signStatus") == 0:
-            self.tlog("今日已签到")
-            return True
+        # sign/history 的 signRecords[0] 是最近一次已签记录（通常为昨天），
+        # 拿它判"今日已签"会隔天漏签；直接签到，把"已签"业务响应当正常态
         r = await self.req(
             "POST",
             f"{UPHONE_H5API}/activity-service/points/v1/sign",
@@ -3588,6 +3620,10 @@ class Unicom:
         body = self.uphone_biz_data(r)
         if body and self.uphone_biz_ok(body):
             self.tlog(f"签到成功: {body.get('msg') or 'ok'}")
+            return True
+        msg = str((body or {}).get("msg") or "")
+        if any(k in msg for k in ("已签", "签过", "重复")):
+            self.tlog(f"今日已签到: {msg}")
             return True
         self.tlog(f"签到失败: {api_response_err(r, 'points/sign')}")
         return False
@@ -3972,286 +4008,6 @@ class Unicom:
         await self.uphone_summer_lottery()
         self.tlog("结束")
 
-    # === 联通客户日：答题 → createKey → 抽奖 → 专区签到 ===
-    def _mday_tea_sign(self, path: str, token: str) -> tuple[str, str]:
-        """
-        OCP 防刷签名（与 H5 axios 拦截器一致）:
-          tea = sha256( (seg[-2] if not 'api-' in seg[-2] else '') + seg[-1] + teatime + token )
-        path 形如 /api-lucky/activity/07/init
-        """
-        teatime = str(int(time.time() * 1000))
-        segs = [s for s in path.split("/") if s]
-        if len(segs) >= 2:
-            prev, last = segs[-2], segs[-1]
-            prefix = "" if "api-" in prev else prev
-            raw = f"{prefix}{last}{teatime}{token}"
-        elif segs:
-            raw = f"{segs[-1]}{teatime}{token}"
-        else:
-            raw = f"{teatime}{token}"
-        tea = hashlib.sha256(raw.encode()).hexdigest()
-        return teatime, tea
-
-    def _mday_headers(self, path: str, *, json_body=True, is_auth=False, need_tea=True):
-        h = {
-            "User-Agent": MDAY_H5_UA,
-            "Origin": "https://c.10010.com",
-            "Referer": "https://c.10010.com/",
-            "Accept": "application/json, text/plain, */*",
-        }
-        token = self.mday_token or ""
-        if token:
-            # isAuth 接口用 Bearer，其余用 bearer（与前端一致）
-            h["Authorization"] = (
-                f"Bearer {token}" if is_auth else f"bearer {token}"
-            )
-            h["member_code"] = token
-            if need_tea:
-                teatime, tea = self._mday_tea_sign(path, token)
-                h["teatime"] = teatime
-                h["tea"] = tea
-        if json_body:
-            h["Content-Type"] = "application/json"
-        else:
-            h["Content-Type"] = "application/x-www-form-urlencoded"
-        return h
-
-    async def mday_login(self):
-        """APP ticket → OCP accesstoken（woapp/login）"""
-        ticket = await self.get_ticket(MDAY_ENTRY)
-        if not ticket:
-            # 兼容 club 入口
-            ticket = await self.get_ticket("https://club.10010.com/index.html")
-        if not ticket:
-            self.tlog("获取 ticket 失败")
-            return False
-        path = "/api-auth/oauth/woapp/login"
-        r = await self.req(
-            "POST",
-            f"{MDAY_OCP}{path}",
-            data={"ticket": ticket, "channel": "woapp"},
-            headers=self._mday_headers(path, json_body=False, need_tea=False),
-        )
-        res = r.get("data") if r else None
-        if not isinstance(res, dict) or str(res.get("code")) not in ("0", "0000"):
-            self.tlog(f"OCP登录失败: {api_response_err(r, 'woapp/login')}")
-            return False
-        data = res.get("data") if isinstance(res.get("data"), dict) else {}
-        token = str(data.get("accesstoken") or data.get("accessToken") or "")
-        if not token:
-            self.tlog(f"OCP登录无 token: {str(res)[:180]}")
-            return False
-        self.mday_token = token
-        phone = str(data.get("phone") or "")
-        self.tlog(f"OCP登录成功: {phone or '已授权'}")
-        return True
-
-    async def mday_api(self, path, body=None, form=False, is_auth=False):
-        if not path.startswith("/"):
-            path = "/" + path
-        url = f"{MDAY_OCP}{path}"
-        kw = {
-            "headers": self._mday_headers(
-                path, json_body=not form, is_auth=is_auth, need_tea=True
-            )
-        }
-        if form:
-            kw["data"] = body or {}
-        else:
-            kw["json"] = body if body is not None else {}
-        return await self.req("POST", url, **kw)
-    async def mday_task(self):
-        """
-        7月客户日：
-          ticket → woapp/login → 07/init → 07/answer → createKey → drawLottery
-          → mdayarea/sign
-        中文密令仅展示；真正抽奖短码由 createKey.msg 下发（前端不写死）。
-        """
-        self._task_tag = "客户日"
-        self.tlog("开始")
-        try:
-            if not await self.mday_login():
-                return
-
-            act_id, ap_id = MDAY_ACT_ID, MDAY_AP_ID
-            r = await self.mday_api(
-                "/api-lucky/activity/07/init",
-                {"act_id": act_id, "ap_id": ap_id},
-            )
-            res = r.get("data") if r else None
-            if not isinstance(res, dict) or str(res.get("code")) not in ("0", "0000"):
-                self.tlog(f"init失败: {api_response_err(r, '07/init')}")
-                return
-            payload = res.get("data") if isinstance(res.get("data"), dict) else {}
-            qlist = payload.get("questionList") or []
-            if not isinstance(qlist, list) or not qlist:
-                self.tlog(f"init无题目: {str(payload)[:180]}")
-                return
-
-            today = datetime.now().strftime("%Y-%m-%d")
-            q = None
-            for item in qlist:
-                if not isinstance(item, dict):
-                    continue
-                if str(item.get("dayId") or "") == today:
-                    q = item
-                    break
-            if q is None:
-                # 取第一道未完成或带 result 的
-                for item in qlist:
-                    if isinstance(item, dict) and item.get("result") in (None, "", 0, "0"):
-                        q = item
-                        break
-                if q is None and isinstance(qlist[0], dict):
-                    q = qlist[0]
-            if not q:
-                self.tlog("未找到今日题目")
-                return
-
-            qid = q.get("id")
-            day_ap = str(q.get("apId") or ap_id)
-            title = str(q.get("title") or q.get("description") or "")[:40]
-            already = q.get("result") in (1, "1")
-            drawn = q.get("draw") in (1, "1", True)
-            self.tlog(
-                f"今日题 id={qid} day={q.get('dayId')} 「{title}」 "
-                f"已答={already} 已抽={drawn} apId={day_ap[-8:]}"
-            )
-
-            keyword = ""
-            if not already:
-                # 优先用服务端下发的 answerIndex；否则顺序试 1..3
-                candidates = []
-                hint = q.get("answerIndex")
-                if hint not in (None, ""):
-                    try:
-                        candidates.append(int(hint))
-                    except (TypeError, ValueError):
-                        pass
-                for i in (1, 2, 3):
-                    if i not in candidates:
-                        candidates.append(i)
-                answered = False
-                for ans in candidates:
-                    r = await self.mday_api(
-                        "/api-lucky/activity/07/answer",
-                        {
-                            "act_id": act_id,
-                            "ap_id": ap_id,
-                            "questionId": qid,
-                            "answerIndex": ans,
-                        },
-                    )
-                    res = r.get("data") if r else None
-                    if not isinstance(res, dict):
-                        self.tlog(f"answer异常: {api_response_err(r, '07/answer')}")
-                        continue
-                    data = res.get("data") if isinstance(res.get("data"), dict) else {}
-                    # 跨天刷新
-                    if data.get("dayId") and str(data.get("dayId")) != str(
-                        q.get("dayId") or today
-                    ):
-                        self.tlog(f"题目已跨天刷新: {data.get('dayId')}")
-                        return
-                    result = data.get("result")
-                    if result in (1, "1"):
-                        keyword = str(data.get("keyword") or "")
-                        self.tlog(
-                            f"答题正确 index={ans} 密令={keyword or '(空)'}"
-                        )
-                        answered = True
-                        break
-                    if result in (0, "0"):
-                        self.tlog(f"答错 index={ans}，重试")
-                        continue
-                    self.tlog(f"answer返回: {str(res)[:160]}")
-                if not answered:
-                    self.tlog("答题失败，跳过抽奖")
-                else:
-                    already = True
-            else:
-                self.tlog("今日已答过，直接尝试抽奖")
-
-            # 抽奖：createKey(apId=当日题apId, code=accesstoken) → msg 短码 → drawLottery
-            if already and not drawn:
-                r = await self.mday_api(
-                    "/api-lucky/activity/createKey",
-                    {"apId": day_ap, "code": self.mday_token},
-                )
-                res = r.get("data") if r else None
-                short = ""
-                if isinstance(res, dict):
-                    # 成功时短码在 msg；也可能在 data
-                    if str(res.get("code")) in ("0", "0000"):
-                        short = str(res.get("msg") or "")
-                        if short in ("成功", "success", "null", "None"):
-                            short = ""
-                        if not short and res.get("data") not in (None, ""):
-                            short = str(res.get("data"))
-                if not short:
-                    self.tlog(f"createKey失败: {api_response_err(r, 'createKey')}")
-                else:
-                    self.tlog(f"抽奖短码={short}")
-                    r = await self.mday_api(
-                        "/api-lucky/winAward/drawLottery",
-                        {
-                            "act_id": act_id,
-                            "ap_id": day_ap,
-                            "code": short,
-                        },
-                    )
-                    res = r.get("data") if r else None
-                    if isinstance(res, dict) and str(res.get("code")) in ("0", "0000"):
-                        data = (
-                            res.get("data")
-                            if isinstance(res.get("data"), dict)
-                            else {}
-                        )
-                        name = data.get("la_name") or data.get("awardName") or res.get(
-                            "msg"
-                        )
-                        self.tlog(f"抽奖结果: {name or str(data)[:120] or '成功'}")
-                    else:
-                        self.tlog(f"抽奖失败: {api_response_err(r, 'drawLottery')}")
-            elif drawn:
-                self.tlog("今日已抽过，跳过")
-
-            # 专区签到（前端 isAuth → Bearer）
-            r = await self.mday_api(
-                "/api-activity/activity/mdayarea/sign", {}, is_auth=True
-            )
-            res = r.get("data") if r else None
-            if isinstance(res, dict) and str(res.get("code")) in ("0", "0000"):
-                self.tlog(f"签到: {res.get('msg') or '成功'} data={res.get('data')}")
-            else:
-                self.tlog(f"签到: {api_response_err(r, 'mdayarea/sign')}")
-
-            r = await self.mday_api(
-                "/api-activity/activity/mdayarea/querySignList",
-                {},
-                is_auth=True,
-            )
-            res = r.get("data") if r else None
-            if isinstance(res, dict) and isinstance(res.get("data"), list):
-                today_item = next(
-                    (
-                        x
-                        for x in res["data"]
-                        if isinstance(x, dict) and x.get("today") in (1, "1")
-                    ),
-                    None,
-                )
-                if today_item:
-                    self.tlog(
-                        f"签到日历: day={today_item.get('id')} "
-                        f"status={today_item.get('status')}"
-                    )
-        except Exception as e:
-            self.tlog_exc(e, "mday_task")
-        finally:
-            self.tlog("结束")
-            self._task_tag = None
-
     # === 主任务 ===
     async def run(self):
         try:
@@ -4269,7 +4025,6 @@ class Unicom:
                 "cloud_battle": self.cloud_battle_task,
                 "shangdu": self.shangdu_task,
                 "uphone": self.uphone_task,
-                "mday": self.mday_task,
             }
             if only:
                 names = [n.strip() for n in only.split(",") if n.strip()]
@@ -4289,8 +4044,19 @@ class Unicom:
                     self.cloud_battle_task,
                     self.shangdu_task,
                     self.uphone_task,
-                    self.mday_task,
                 ]
+            # 服务端长期不可用的模块（如 wocare 接口整体 5xx）可用环境变量停掉，
+            # 避免每次运行都产生注定失败的异常并淹没推送
+            skip = {
+                n.strip()
+                for n in os.environ.get("UNICOM_SKIP_TASK", "").split(",")
+                if n.strip()
+            }
+            if skip:
+                skipped = [n for n in skip if n in task_map]
+                tasks = [t for t in tasks if t not in {task_map[n] for n in skipped}]
+                if skipped:
+                    self.log(f"已按 UNICOM_SKIP_TASK 跳过: {','.join(sorted(skipped))}")
             for task in tasks:
                 try:
                     await task()
@@ -4301,7 +4067,11 @@ class Unicom:
 
 
 async def main():
-    print(f"开始: {datetime.now():%Y-%m-%d %H:%M:%S}")
+    # 10点开抢/日期比对/周日判断都依赖本地时区，容器 TZ 为空时显式钉死
+    os.environ.setdefault("TZ", "Asia/Shanghai")
+    if hasattr(time, "tzset"):
+        time.tzset()
+    print(f"开始: {datetime.now():%Y-%m-%d %H:%M:%S} TZ={os.environ.get('TZ')}")
     cookies = os.environ.get("chinaUnicomCookie", "")
     if not cookies:
         print("未找到环境变量 chinaUnicomCookie")
@@ -4315,6 +4085,13 @@ async def main():
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             print(f"账号{i + 1} 未捕获异常: {result}", flush=True)
+    push_lines = [
+        l
+        for l in NOTIFY_LINES
+        if any(k in l for k in ("失败", "异常", "成功", "抽奖"))
+    ]
+    if push_lines:
+        notify_send("中国联通任务", "\n".join(push_lines))
     print("结束")
 
 
