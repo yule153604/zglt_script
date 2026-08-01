@@ -120,6 +120,11 @@ UPHONE_CHECKIN_PAGE = "https://h5forphone.wostore.cn/changXiangVip/CLD13.html"
 UPHONE_CHANNEL = "ST-Wode"
 UPHONE_CHANNEL_H5 = "ST-Jingang002"
 UPHONE_EDOP_APP_ID = "edop_unicom_68e8fa69"
+
+# 歌手2026活动
+SINGER_ACTIVITY_ID = "MzE="
+SINGER_CLIENT_ID = "1001000035"
+SINGER_TEMPLATE_ID = "2082343732758274048"
 UPHONE_ACT_SIGN = "Points_Sign_2507"
 UPHONE_ACT_OBTAIN = "Points_Obtain_2507"
 UPHONE_ACT_EXCHANGE = "Points_Exchange_2507"
@@ -2998,6 +3003,7 @@ class Unicom:
         init_data = init_r["data"].get("data") or {}
         sign_info = init_data.get("signInInfo") or {}
         lottery_info = init_data.get("lotteryInfo") or {}
+        reward_nodes = sign_info.get("rewardNodes") or []
         self.tlog(
             f"初始化完成 签到状态={sign_info.get('status')} 抽奖次数={lottery_info.get('remainCount')}"
         )
@@ -3015,6 +3021,18 @@ class Unicom:
                 self.tlog(
                     f"签到失败 HTTP {sign_r.get('code')} {self.shangdu_api_msg(sign_r)}"
                 )
+
+        # 检查节点奖励补领 (如 7天、14天累签节点奖)
+        for node in reward_nodes:
+            day = node.get("day")
+            status = node.get("status")
+            if status == "CLAIMABLE" and day:
+                self.tlog(f"发现可领取/补领的 {day} 天节点大奖，正在提交补领...")
+                claim_r = await self.shangdu_api("POST", f"/monthlyRecharge/signIn/reward/{day}/claim")
+                if self.shangdu_api_ok(claim_r):
+                    self.tlog(f"{day} 天节点大奖补领成功! 响应: {claim_r.get('data')}")
+                else:
+                    self.tlog(f"{day} 天节点大奖补领失败: HTTP {claim_r.get('code')} {self.shangdu_api_msg(claim_r)}")
 
         await asyncio.sleep(1)
         init_r = await self.shangdu_api("GET", "/monthlyRecharge/init")
@@ -4008,6 +4026,188 @@ class Unicom:
         await self.uphone_summer_lottery()
         self.tlog("结束")
 
+    # === 10. 歌手2026活动（UniClaw + AI入戏 + 抽奖）===
+    async def singer_task(self):
+        """歌手2026: 每日 UniClaw体验 + AI入戏制作，抽奖机会自动抽完。
+        转存仅需一次（开启活动），不做每日任务。
+        """
+        self._task_tag = "歌手2026"
+        pan_token = self.cloud_disk_token()
+        mobile = self.mobile
+        if not pan_token or not mobile:
+            self.tlog("缺少云盘 token 或手机号，跳过")
+            return
+        try:
+            await self._singer_run(pan_token, mobile)
+        except Exception as e:
+            self.tlog_exc(e, "歌手2026")
+
+    async def _singer_run(self, pan_token, mobile):
+        postage = hashlib.md5(mobile.encode()).hexdigest()
+        referer = (
+            f"https://panservice.mail.wo.cn/h5/activitymobile/singer2026?"
+            f"activityId={SINGER_ACTIVITY_ID}&type=06&ticket=api&version=iphone_c%4012.1400"
+            f"&timestamp={datetime.now():%Y%m%d%H%M%S}&desmobile={mobile}"
+            f"&num=0&postage={postage}&clientid=1001000003&token={pan_token}"
+            f"&touchpoint=300200030004&userNumber={mobile}"
+        )
+        act_headers = {
+            "token": pan_token, "accesstoken": pan_token,
+            "access-token": pan_token, "x-yp-access-token": pan_token,
+            "clientid": SINGER_CLIENT_ID, "client-id": SINGER_CLIENT_ID,
+            "x-yp-client-id": SINGER_CLIENT_ID,
+            "x-yp-app-version": "5.4.2", "x-yp-open-version": "v1.0",
+            "x-cm-service": "PHONE", "x-path": "/h5/activitymobile/singer2026/main1",
+            "source-type": "woapi",
+            "requesttime": str(int(time.time() * 1000)),
+            "content-type": "application/json",
+            "user-agent": UA, "referer": referer, "origin": "https://panservice.mail.wo.cn",
+        }
+
+        async def api(method, path, **kw):
+            kw.setdefault("headers", act_headers)
+            return await self.req(method, f"https://panservice.mail.wo.cn{path}", **kw)
+
+        async def get_ts(key):
+            d = await api("POST", "/activity/getTimestamp", json={"key": key})
+            data = d.get("data")
+            return data.get("result", {}) if isinstance(data, dict) else {}
+
+        def sign(params):
+            keys = sorted(params)
+            u = "&".join(
+                f"{k}={str(params[k]).strip()}"
+                for k in keys if str(params[k]).strip() != ""
+            )
+            return hmac.new(CLOUD_PAN_SIGN_SECRET.encode(),
+                            (u + "&secret=" + CLOUD_PAN_SIGN_SECRET).encode(),
+                            hashlib.sha256).hexdigest()
+
+        # 活动状态
+        d = await api("GET", "/activity/checkActivityStatus",
+                      params={"activityId": SINGER_ACTIVITY_ID})
+        data = d.get("data")
+        if isinstance(data, dict) and (data.get("result") or {}).get("state") != 1:
+            self.tlog("活动未开启，跳过")
+            return
+
+        # ── UniClaw 体验（每日一次）──
+        try:
+            ts = await get_ts("activity:query:task2")
+            p = {"activityId": SINGER_ACTIVITY_ID, "nonce": ts.get("nonce", ""),
+                 "timestamp": ts.get("timestamp", "")}
+            p["sign"] = sign(p)
+            d = await api("POST", "/activity/aiRole/task2/query", json=p)
+            done = (d.get("data") or {}).get("result")
+            if done == 1:
+                self.tlog("UniClaw 今日已体验")
+            else:
+                ts = await get_ts("activity:acquire:task2")
+                p = {"activityId": SINGER_ACTIVITY_ID, "nonce": ts.get("nonce", ""),
+                     "timestamp": ts.get("timestamp", "")}
+                p["sign"] = sign(p)
+                d = await api("POST", "/activity/aiRole/task2", json=p)
+                meta = (d.get("data") or {}).get("meta") or {}
+                if str(meta.get("code")) == "200":
+                    self.tlog("UniClaw 体验完成 (许愿值+1 抽奖+1)")
+                else:
+                    self.tlog(f"UniClaw 上报失败: {json.dumps(d.get('data'), ensure_ascii=False)[:100]}")
+        except Exception as e:
+            self.tlog_exc(e, "UniClaw")
+
+        # ── AI 入戏制作（每日一次，避免浪费 faceCount）──
+        try:
+            today = datetime.now().strftime("%Y-%m-%d")
+            d = await api("GET", "/activity/activity/task/info",
+                          params={"activityId": SINGER_ACTIVITY_ID})
+            logs = ((d.get("data") or {}).get("result") or {}).get("logs") or []
+            ai_done = any(
+                str(l.get("taskType")) == "6001"
+                and str(l.get("completionTime", "")).startswith(today)
+                for l in logs if isinstance(l, dict)
+            )
+            if ai_done:
+                self.tlog("AI入戏 今日已完成")
+            else:
+                await self._singer_ai_drama(api, sign)
+        except Exception as e:
+            self.tlog_exc(e, "AI入戏")
+
+        # ── 抽奖（抽完剩余次数）──
+        try:
+            for _ in range(5):
+                d = await api("GET", "/activity/lottery/lottery-times",
+                              params={"activityId": SINGER_ACTIVITY_ID})
+                times = (d.get("data") or {}).get("result", 0)
+                if not times or times <= 0:
+                    self.tlog("抽奖: 无剩余次数")
+                    return
+                ts = await get_ts("activity:lottery")
+                p = {"activityId": SINGER_ACTIVITY_ID, "nonce": ts.get("nonce", ""),
+                     "timestamp": ts.get("timestamp", "")}
+                p["sign"] = sign(p)
+                d = await api("POST", "/activity/lottery", json=p)
+                prize = (d.get("data") or {}).get("result") or {}
+                self.tlog(f"抽奖: {prize.get('prizeName') or prize}")
+                await asyncio.sleep(1)
+        except Exception as e:
+            self.tlog_exc(e, "抽奖")
+
+    async def _singer_ai_drama(self, api, sign):
+        # 云盘照片列表
+        d = await api("POST", "/wohome/knowledge/queryTypeFileList", json={
+            "pageSize": 20, "pageNo": 1, "suffixList": ["jpg", "jpeg", "png"],
+            "fileType": "1", "spaceType": 0, "sortRule": "0"})
+        data = d.get("data")
+        photos = ((data or {}).get("result") or {}).get("details") or []
+        if not photos:
+            self.tlog("AI入戏: 云盘无照片，跳过")
+            return
+        # 芒果换票（用完整活动 headers）
+        r = await api("POST", "/api-user/api/user/ticket", json={})
+        tmp = (r.get("data") or {}).get("result", {}).get("ticket")
+        if not tmp:
+            self.tlog("AI入戏: 换票失败")
+            return
+        r = await self.req("GET", "https://mgcact.api.mgtv.com/api/cu/login",
+                           params={"ticket": tmp, "t": str(int(time.time() * 1000))},
+                           headers={"referer": "https://panservice.mail.wo.cn/",
+                                    "user-agent": UA, "origin": "https://panservice.mail.wo.cn"})
+        m_ticket = (r.get("data") or {}).get("data", {}).get("ticket")
+        if not m_ticket:
+            self.tlog("AI入戏: 芒果登录失败")
+            return
+        mgt_headers = {"referer": "https://pop.mgtv.com/", "user-agent": UA,
+                       "origin": "https://pop.mgtv.com", "content-type": "application/json"}
+        # 遍历照片逐个尝试（需人像正面照）
+        for photo in photos:
+            fid = photo.get("fid") or ""
+            r = await self.req("POST", "https://mgcact.api.mgtv.com/api/cu/video/template/submit",
+                               json={"ticket": m_ticket, "t": str(int(time.time() * 1000)),
+                                     "templateId": SINGER_TEMPLATE_ID, "index": 0, "imgUrl": fid},
+                               headers=mgt_headers)
+            d = r.get("data") or {}
+            task_id = (d.get("data") or {}).get("taskId")
+            if not task_id:
+                self.tlog(f"AI入戏: {photo.get('fileName')} 照片未通过识别，换下一张")
+                continue
+            self.tlog(f"AI入戏: 提交成功，等待审核 (照片={photo.get('fileName')})")
+            # 轮询审核状态（auditState=3 通过 = 任务完成）
+            for _ in range(6):
+                await asyncio.sleep(3)
+                r = await self.req("GET", "https://mgcact.api.mgtv.com/api/cu/video/template/result",
+                                   params={"ticket": m_ticket, "t": str(int(time.time() * 1000)),
+                                           "taskId": task_id},
+                                   headers={"referer": "https://pop.mgtv.com/",
+                                            "user-agent": UA, "origin": "https://pop.mgtv.com"})
+                rd = ((r.get("data") or {}).get("data") or {})
+                if rd.get("auditState") == 3:
+                    self.tlog("AI入戏 审核通过 (许愿值+1 抽奖+1)")
+                    return
+            self.tlog("AI入戏: 审核轮询结束（稍后可在作品列表查看）")
+            return
+        self.tlog("AI入戏: 所有照片均未通过识别")
+
     # === 主任务 ===
     async def run(self):
         try:
@@ -4025,6 +4225,7 @@ class Unicom:
                 "cloud_battle": self.cloud_battle_task,
                 "shangdu": self.shangdu_task,
                 "uphone": self.uphone_task,
+                "singer": self.singer_task,
             }
             if only:
                 names = [n.strip() for n in only.split(",") if n.strip()]
@@ -4044,6 +4245,7 @@ class Unicom:
                     self.cloud_battle_task,
                     self.shangdu_task,
                     self.uphone_task,
+                    self.singer_task,
                 ]
             # 服务端长期不可用的模块（如 wocare 接口整体 5xx）可用环境变量停掉，
             # 避免每次运行都产生注定失败的异常并淹没推送
